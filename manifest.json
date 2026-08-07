@@ -1,0 +1,11 @@
+{
+	"id": "trellosync",
+	"name": "Trello-Sync",
+	"version": "1.0.0",
+	"minAppVersion": "1.0.0",
+	"description": "Live sync between trello and obsidian",
+	"author": "KfirG",
+	"authorUrl": "https://obsidian.md",
+	"fundingUrl": "https://obsidian.md/pricing",
+	"isDesktopOnly": false
+}
