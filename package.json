@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-sample-plugin",
-	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"name": "Trello-Sync",
+	"version": "1.0.4",
+	"description": "Live sync between Obsidian and Trello",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
