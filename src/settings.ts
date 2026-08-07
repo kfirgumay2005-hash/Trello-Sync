@@ -1,5 +1,5 @@
-import { App, PluginSettingTab, Setting, TFile } from 'obsidian';
-import MyPlugin from './main';
+import { App, PluginSettingTab, Setting } from 'obsidian';
+import TrelloSyncPlugin from './main';
 
 export interface TrelloPluginSettings {
 	apiKey: string;
@@ -19,19 +19,23 @@ export const DEFAULT_SETTINGS: TrelloPluginSettings = {
 	deleteBehavior: 'archive',
 };
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export class TrelloSyncSettingTab extends PluginSettingTab {
+	plugin: TrelloSyncPlugin;
 
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: TrelloSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
-	async display(): Promise<void> {
+	display(): void {
 		const { containerEl } = this;
 
 		containerEl.empty();
-		containerEl.createEl('h2', { text: 'Trello Connection Settings' });
+
+		// Proper Obsidian Heading API
+		new Setting(containerEl)
+			.setName('Trello Connection Settings')
+			.setHeading();
 
 		// API Key Setting
 		new Setting(containerEl)
@@ -41,17 +45,17 @@ export class SampleSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder('Enter API Key...')
 					.setValue(this.plugin.settings.apiKey)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.apiKey = value.trim();
-						await this.plugin.saveSettings();
-						this.plugin.setupSyncInterval();
-						// Refresh tab display to dynamically try fetching boards if credentials provided
-						if (
-							this.plugin.settings.apiKey &&
-							this.plugin.settings.apiToken
-						) {
-							this.display();
-						}
+						void this.plugin.saveSettings().then(() => {
+							this.plugin.setupSyncInterval();
+							if (
+								this.plugin.settings.apiKey &&
+								this.plugin.settings.apiToken
+							) {
+								this.display();
+							}
+						});
 					}),
 			);
 
@@ -63,21 +67,22 @@ export class SampleSettingTab extends PluginSettingTab {
 				text
 					.setPlaceholder('Enter Token...')
 					.setValue(this.plugin.settings.apiToken)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						this.plugin.settings.apiToken = value.trim();
-						await this.plugin.saveSettings();
-						this.plugin.setupSyncInterval();
-						// Refresh tab display to dynamically try fetching boards if credentials provided
-						if (
-							this.plugin.settings.apiKey &&
-							this.plugin.settings.apiToken
-						) {
-							this.display();
-						}
+						void this.plugin.saveSettings().then(() => {
+							this.plugin.setupSyncInterval();
+							if (
+								this.plugin.settings.apiKey &&
+								this.plugin.settings.apiToken
+							) {
+								this.display();
+							}
+						});
 					}),
 			);
 
-		containerEl.createEl('h3', { text: 'Board & Sync Settings' });
+		// Section Heading
+		new Setting(containerEl).setName('Board & Sync Settings').setHeading();
 
 		// Board Selection Dropdown
 		const boardSetting = new Setting(containerEl)
@@ -91,37 +96,39 @@ export class SampleSettingTab extends PluginSettingTab {
 			return;
 		}
 
-		try {
-			const boards = await this.plugin.getTrelloBoards();
+		void this.plugin
+			.getTrelloBoards()
+			.then((boards) => {
+				if (!boards || boards.length === 0) {
+					boardSetting.setDesc(
+						'No boards found in your Trello account.',
+					);
+					return;
+				}
 
-			if (!boards || boards.length === 0) {
-				boardSetting.setDesc('No boards found in your Trello account.');
-				return;
-			}
+				boardSetting.addDropdown((dropdown) => {
+					dropdown.addOption('', '-- Select a Board --');
 
-			boardSetting.addDropdown((dropdown) => {
-				dropdown.addOption('', '-- Select a Board --');
+					boards.forEach((board) => {
+						dropdown.addOption(board.id, board.name);
+					});
 
-				boards.forEach((board) => {
-					dropdown.addOption(board.id, board.name);
+					dropdown.setValue(this.plugin.settings.selectedBoardId);
+
+					dropdown.onChange((value) => {
+						this.plugin.settings.selectedBoardId = value;
+						void this.plugin.saveSettings().then(() => {
+							void this.plugin.syncSelectedBoard(true);
+						});
+					});
 				});
-
-				dropdown.setValue(this.plugin.settings.selectedBoardId);
-
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.selectedBoardId = value;
-					await this.plugin.saveSettings();
-					// Trigger an immediate sync once a board is selected
-					await this.plugin.syncSelectedBoard(true);
-				});
+			})
+			.catch((error: unknown) => {
+				console.error('Failed to load boards in settings:', error);
+				boardSetting.setDesc(
+					'❌ Error loading boards. Please verify your API credentials.',
+				);
 			});
-		} catch (error) {
-			console.error('Failed to load boards in settings:', error);
-			boardSetting.setDesc(
-				'❌ Error loading boards. Please verify your API credentials.',
-			);
-			return;
-		}
 
 		// Target Note Selection Dropdown
 		const noteSetting = new Setting(containerEl)
@@ -141,9 +148,9 @@ export class SampleSettingTab extends PluginSettingTab {
 
 			dropdown.setValue(this.plugin.settings.targetNotePath || '');
 
-			dropdown.onChange(async (value) => {
+			dropdown.onChange((value) => {
 				this.plugin.settings.targetNotePath = value;
-				await this.plugin.saveSettings();
+				void this.plugin.saveSettings();
 				this.plugin.knownCardIds.clear();
 			});
 		});
@@ -165,15 +172,15 @@ export class SampleSettingTab extends PluginSettingTab {
 					this.plugin.settings.deleteBehavior || 'archive',
 				);
 
-				dropdown.onChange(async (value) => {
+				dropdown.onChange((value) => {
 					this.plugin.settings.deleteBehavior = value as
 						| 'delete'
 						| 'archive';
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				});
 			});
 
-		// Sync Interval Setting (in Seconds)
+		// Sync Interval Setting
 		new Setting(containerEl)
 			.setName('Auto-Sync Interval (Seconds)')
 			.setDesc(
@@ -185,12 +192,13 @@ export class SampleSettingTab extends PluginSettingTab {
 					.setValue(
 						String(this.plugin.settings.syncIntervalSeconds || 30),
 					)
-					.onChange(async (value) => {
+					.onChange((value) => {
 						const num = parseInt(value.trim(), 10);
 						if (!isNaN(num) && num > 0) {
 							this.plugin.settings.syncIntervalSeconds = num;
-							await this.plugin.saveSettings();
-							this.plugin.setupSyncInterval();
+							void this.plugin.saveSettings().then(() => {
+								this.plugin.setupSyncInterval();
+							});
 						}
 					}),
 			);

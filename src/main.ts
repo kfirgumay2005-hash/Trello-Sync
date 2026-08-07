@@ -1,8 +1,8 @@
 import { Notice, Plugin, requestUrl, TFile } from 'obsidian';
 import {
 	DEFAULT_SETTINGS,
-	SampleSettingTab,
 	TrelloPluginSettings,
+	TrelloSyncSettingTab,
 } from './settings';
 
 export interface TrelloBoard {
@@ -24,7 +24,7 @@ export interface TrelloCard {
 	dueComplete?: boolean;
 }
 
-export default class MyPlugin extends Plugin {
+export default class TrelloSyncPlugin extends Plugin {
 	settings!: TrelloPluginSettings;
 	syncTimerId: number | null = null;
 	knownCardIds: Set<string> = new Set();
@@ -32,24 +32,20 @@ export default class MyPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		// Ribbon icon to sync cards from selected board
-		this.addRibbonIcon('folder-sync', 'Sync Trello Board', async () => {
-			await this.syncSelectedBoard();
+		this.addRibbonIcon('folder-sync', 'Sync Trello Board', () => {
+			void this.syncSelectedBoard();
 		});
 
-		// Command palette option for syncing
 		this.addCommand({
 			id: 'sync-trello-board',
 			name: 'Sync Selected Trello Board',
-			callback: async () => {
-				await this.syncSelectedBoard();
+			callback: () => {
+				void this.syncSelectedBoard();
 			},
 		});
 
-		// Add settings tab
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addSettingTab(new TrelloSyncSettingTab(this.app, this));
 
-		// Start background interval
 		this.setupSyncInterval();
 	}
 
@@ -73,14 +69,12 @@ export default class MyPlugin extends Plugin {
 		const intervalMs = seconds * 1000;
 
 		this.syncTimerId = this.registerInterval(
-			window.setInterval(async () => {
-				console.log('Running background Trello sync...');
-				await this.syncSelectedBoard(true);
+			window.setInterval(() => {
+				void this.syncSelectedBoard(true);
 			}, intervalMs),
 		);
 	}
 
-	// Fetch all boards
 	async getTrelloBoards(): Promise<TrelloBoard[]> {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${apiToken}&fields=name,id`;
@@ -94,7 +88,6 @@ export default class MyPlugin extends Plugin {
 		return response.json as TrelloBoard[];
 	}
 
-	// Fetch lists for a specific board
 	async getBoardLists(boardId: string): Promise<TrelloList[]> {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/boards/${boardId}/lists?key=${apiKey}&token=${apiToken}&fields=name,id`;
@@ -108,7 +101,6 @@ export default class MyPlugin extends Plugin {
 		return response.json as TrelloList[];
 	}
 
-	// Fetch cards for a specific board
 	async getBoardCards(boardId: string): Promise<TrelloCard[]> {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/boards/${boardId}/cards?key=${apiKey}&token=${apiToken}&fields=name,idList,desc,closed,dueComplete`;
@@ -122,7 +114,6 @@ export default class MyPlugin extends Plugin {
 		return response.json as TrelloCard[];
 	}
 
-	// Create a new card in Trello
 	async createTrelloCard(name: string, listId: string): Promise<TrelloCard> {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/cards?key=${apiKey}&token=${apiToken}&idList=${listId}&name=${encodeURIComponent(name)}`;
@@ -136,7 +127,6 @@ export default class MyPlugin extends Plugin {
 		return response.json as TrelloCard;
 	}
 
-	// Delete a card permanently in Trello
 	async deleteTrelloCard(cardId: string) {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}`;
@@ -148,7 +138,6 @@ export default class MyPlugin extends Plugin {
 		});
 	}
 
-	// Archive (close) a card in Trello
 	async archiveTrelloCard(cardId: string) {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}&closed=true`;
@@ -160,7 +149,6 @@ export default class MyPlugin extends Plugin {
 		});
 	}
 
-	// Update card dueComplete status in Trello
 	async updateTrelloCardStatus(cardId: string, isComplete: boolean) {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}&dueComplete=${isComplete}`;
@@ -172,7 +160,6 @@ export default class MyPlugin extends Plugin {
 		});
 	}
 
-	// Helper method to resolve target file based on settings
 	private getTargetFile(): TFile | null {
 		const targetPath = this.settings.targetNotePath;
 		if (targetPath) {
@@ -184,7 +171,6 @@ export default class MyPlugin extends Plugin {
 		return null;
 	}
 
-	// Main function to sync without overwriting existing non-Trello note content
 	async syncSelectedBoard(isBackground = false) {
 		const { apiKey, apiToken, selectedBoardId, deleteBehavior } =
 			this.settings;
@@ -207,7 +193,7 @@ export default class MyPlugin extends Plugin {
 			const currentBoard = boards.find((b) => b.id === selectedBoardId);
 			const boardName = currentBoard ? currentBoard.name : 'Trello Board';
 
-			let existingFile = this.getTargetFile();
+			const existingFile = this.getTargetFile();
 
 			const lists = await this.getBoardLists(selectedBoardId);
 			let cards = await this.getBoardCards(selectedBoardId);
@@ -220,7 +206,6 @@ export default class MyPlugin extends Plugin {
 			if (existingFile) {
 				existingContent = await this.app.vault.read(existingFile);
 
-				// Step 1: Extract all card IDs present in the note
 				const presentCardIds = new Set<string>();
 				const idExtractRegex = /<!-- id:([a-zA-Z0-9]+) -->/g;
 				let idMatch: RegExpExecArray | null;
@@ -233,24 +218,17 @@ export default class MyPlugin extends Plugin {
 					}
 				}
 
-				// Step 2: Handle deletions for known cards missing from note
 				if (this.knownCardIds.size > 0) {
 					for (const knownId of this.knownCardIds) {
 						if (!presentCardIds.has(knownId)) {
 							try {
 								if (deleteBehavior === 'delete') {
 									await this.deleteTrelloCard(knownId);
-									console.log(
-										`Permanently deleted card ${knownId} in Trello.`,
-									);
 								} else {
 									await this.archiveTrelloCard(knownId);
-									console.log(
-										`Archived card ${knownId} in Trello.`,
-									);
 								}
 								cards = cards.filter((c) => c.id !== knownId);
-							} catch (err) {
+							} catch (err: unknown) {
 								console.error(
 									`Failed to remove/archive card ${knownId} in Trello:`,
 									err,
@@ -262,7 +240,6 @@ export default class MyPlugin extends Plugin {
 
 				this.knownCardIds = presentCardIds;
 
-				// Step 3: Track section context (Header ## List Name) and detect new cards
 				const lines = existingContent.split('\n');
 				let currentListId = defaultFallbackListId;
 
@@ -295,10 +272,7 @@ export default class MyPlugin extends Plugin {
 								);
 								cards.push(newCard);
 								this.knownCardIds.add(newCard.id);
-								console.log(
-									`Created new Trello Card: "${cardName}" in list ID: ${currentListId}`,
-								);
-							} catch (err) {
+							} catch (err: unknown) {
 								console.error(
 									`Failed to create card "${cardName}" in Trello:`,
 									err,
@@ -308,7 +282,6 @@ export default class MyPlugin extends Plugin {
 					}
 				}
 
-				// Step 4: Update Trello dueComplete status if checkbox changed
 				const lineRegex =
 					/- \[(x|X| )\] (.*?) <!-- id:([a-zA-Z0-9]+) -->/g;
 				let match: RegExpExecArray | null;
@@ -331,10 +304,7 @@ export default class MyPlugin extends Plugin {
 								isCheckedInObsidian,
 							);
 							currentCard.dueComplete = isCheckedInObsidian;
-							console.log(
-								`Updated Trello Card ${cardId} dueComplete -> ${isCheckedInObsidian}`,
-							);
-						} catch (err) {
+						} catch (err: unknown) {
 							console.error(
 								`Failed to update Trello card ${cardId}:`,
 								err,
@@ -343,7 +313,6 @@ export default class MyPlugin extends Plugin {
 					}
 				}
 
-				// Separate Trello section from user's custom content
 				const endMarker = '<!-- END TRELLO SYNC -->';
 				if (existingContent.includes(endMarker)) {
 					extraUserContent =
@@ -353,7 +322,6 @@ export default class MyPlugin extends Plugin {
 				}
 			}
 
-			// Step 5: Rebuild Trello Content Block
 			let trelloSection = `# ${boardName}\n\n`;
 			trelloSection += `*Synced from Trello on ${new Date().toLocaleString()}*\n\n---\n\n`;
 
@@ -389,7 +357,6 @@ export default class MyPlugin extends Plugin {
 				? `${trelloSection}${extraUserContent}`
 				: trelloSection;
 
-			// Step 6: Write back to file or create new
 			let targetFile: TFile;
 			if (existingFile) {
 				await this.app.vault.modify(existingFile, fullMarkdownContent);
@@ -424,7 +391,7 @@ export default class MyPlugin extends Plugin {
 			if (!isBackground) {
 				await this.app.workspace.getLeaf().openFile(targetFile);
 			}
-		} catch (error) {
+		} catch (error: unknown) {
 			console.error('Trello Sync Error:', error);
 			if (!isBackground) {
 				new Notice(
