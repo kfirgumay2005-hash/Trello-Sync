@@ -32,10 +32,8 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		// Proper Obsidian Heading API
-		new Setting(containerEl)
-			.setName('Trello Connection Settings')
-			.setHeading();
+		// Section Heading without the word "Settings"
+		new Setting(containerEl).setName('Trello Connection').setHeading();
 
 		// API Key Setting
 		new Setting(containerEl)
@@ -81,8 +79,8 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// Section Heading
-		new Setting(containerEl).setName('Board & Sync Settings').setHeading();
+		// Section Heading without the word "Settings"
+		new Setting(containerEl).setName('Board & Sync Options').setHeading();
 
 		// Board Selection Dropdown
 		const boardSetting = new Setting(containerEl)
