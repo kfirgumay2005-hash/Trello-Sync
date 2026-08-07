@@ -37,7 +37,7 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		// Section Heading without the word "Settings"
+		// Section Heading without the word
 		new Setting(containerEl).setName('Trello Connection').setHeading();
 
 		// API Key Setting
@@ -84,8 +84,8 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// Section Heading without the word "Settings"
-		new Setting(containerEl).setName('Board & Sync Options').setHeading();
+		// Section Heading without the word
+		new Setting(containerEl).setName('Board & Sync').setHeading();
 
 		// Board Selection Dropdown
 		const boardSetting = new Setting(containerEl)

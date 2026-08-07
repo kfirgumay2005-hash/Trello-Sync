@@ -1,7 +1,7 @@
 {
 	"id": "trellosync",
 	"name": "Trello-Sync",
-	"version": "1.0.4",
+	"version": "1.0.5",
 	"minAppVersion": "1.0.0",
 	"description": "Live bidirectional sync between Trello boards and notes.",
 	"author": "KfirG",
