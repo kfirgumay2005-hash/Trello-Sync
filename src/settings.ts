@@ -27,6 +27,11 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	// Solves the warning: "This PluginSettingTab does not implement getSettingDefinitions()"
+	getSettingDefinitions() {
+		return [];
+	}
+
 	display(): void {
 		const { containerEl } = this;
 
@@ -122,7 +127,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				});
 			})
 			.catch((error: unknown) => {
-				console.error('Failed to load boards in settings:', error);
+				const errorMsg =
+					error instanceof Error ? error.message : String(error);
+				console.error('Failed to load boards in settings:', errorMsg);
 				boardSetting.setDesc(
 					'❌ Error loading boards. Please verify your API credentials.',
 				);

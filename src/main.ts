@@ -229,9 +229,13 @@ export default class TrelloSyncPlugin extends Plugin {
 								}
 								cards = cards.filter((c) => c.id !== knownId);
 							} catch (err: unknown) {
+								const errMsg =
+									err instanceof Error
+										? err.message
+										: String(err);
 								console.error(
 									`Failed to remove/archive card ${knownId} in Trello:`,
-									err,
+									errMsg,
 								);
 							}
 						}
@@ -273,9 +277,13 @@ export default class TrelloSyncPlugin extends Plugin {
 								cards.push(newCard);
 								this.knownCardIds.add(newCard.id);
 							} catch (err: unknown) {
+								const errMsg =
+									err instanceof Error
+										? err.message
+										: String(err);
 								console.error(
 									`Failed to create card "${cardName}" in Trello:`,
-									err,
+									errMsg,
 								);
 							}
 						}
@@ -305,9 +313,13 @@ export default class TrelloSyncPlugin extends Plugin {
 							);
 							currentCard.dueComplete = isCheckedInObsidian;
 						} catch (err: unknown) {
+							const errMsg =
+								err instanceof Error
+									? err.message
+									: String(err);
 							console.error(
 								`Failed to update Trello card ${cardId}:`,
-								err,
+								errMsg,
 							);
 						}
 					}
@@ -392,7 +404,10 @@ export default class TrelloSyncPlugin extends Plugin {
 				await this.app.workspace.getLeaf().openFile(targetFile);
 			}
 		} catch (error: unknown) {
-			console.error('Trello Sync Error:', error);
+			// Solves the warning: "Unsafe assignment of an error or any typed value"
+			const errorMessage =
+				error instanceof Error ? error.message : String(error);
+			console.error('Trello Sync Error:', errorMessage);
 			if (!isBackground) {
 				new Notice(
 					'❌ Failed to sync Trello board. Check console for details.',
