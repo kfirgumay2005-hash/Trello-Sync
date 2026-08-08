@@ -1,7 +1,7 @@
 {
 	"id": "trellosync",
 	"name": "Trello-Sync",
-	"version": "1.1.2",
+	"version": "1.3.0",
 	"minAppVersion": "1.4.0",
 	"description": "Live bidirectional sync between Trello boards and Obdisian notes.",
 	"author": "KfirG",

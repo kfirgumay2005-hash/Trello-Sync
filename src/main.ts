@@ -1,4 +1,4 @@
-import { Notice, Plugin, requestUrl, TFile } from 'obsidian';
+import { Notice, Plugin, requestUrl, TFile, TFolder } from 'obsidian';
 import {
 	BoardMapping,
 	DEFAULT_SETTINGS,
@@ -30,6 +30,7 @@ export default class TrelloSyncPlugin extends Plugin {
 	settings!: TrelloPluginSettings;
 	syncTimerId: number | null = null;
 	knownCardIdsByMapping: Map<string, Set<string>> = new Map();
+	lastKnownCardStatus: Map<string, boolean> = new Map();
 
 	async onload() {
 		await this.loadSettings();
@@ -79,7 +80,6 @@ export default class TrelloSyncPlugin extends Plugin {
 
 	async getTrelloBoards(): Promise<TrelloBoard[]> {
 		const { apiKey, apiToken } = this.settings;
-		// Added filter=open & fields=name,id,closed to only pull active (open) boards
 		const url = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${apiToken}&fields=name,id,closed&filter=open`;
 
 		const response = await requestUrl({
@@ -177,11 +177,9 @@ export default class TrelloSyncPlugin extends Plugin {
 	async syncAllBoards(isBackground = false) {
 		const { apiKey, apiToken, boardMappings } = this.settings;
 
-		if (!apiKey || !apiToken || boardMappings.length === 0) {
+		if (!apiKey || !apiToken) {
 			if (!isBackground) {
-				new Notice(
-					'⚠️ Please configure API credentials and board mappings in settings.',
-				);
+				new Notice('⚠️ Please configure API credentials in settings.');
 			}
 			return;
 		}
@@ -194,6 +192,10 @@ export default class TrelloSyncPlugin extends Plugin {
 			if (mapping && mapping.boardId) {
 				await this.syncSingleMapping(mapping, isBackground);
 			}
+		}
+
+		if (this.settings.enableFolderToTrello) {
+			await this.syncFolderToTrelloList();
 		}
 	}
 
@@ -284,6 +286,8 @@ export default class TrelloSyncPlugin extends Plugin {
 					if (newCardMatch && !line.includes('<!-- id:')) {
 						const rawCardName = newCardMatch[2];
 						const cardName = rawCardName ? rawCardName.trim() : '';
+						const isCheckedInObsidian =
+							newCardMatch[1]?.toLowerCase() === 'x';
 
 						if (cardName && currentListId) {
 							try {
@@ -291,8 +295,19 @@ export default class TrelloSyncPlugin extends Plugin {
 									cardName,
 									currentListId,
 								);
+								if (isCheckedInObsidian) {
+									await this.updateTrelloCardStatus(
+										newCard.id,
+										true,
+									);
+									newCard.dueComplete = true;
+								}
 								cards.push(newCard);
 								knownCardIds.add(newCard.id);
+								this.lastKnownCardStatus.set(
+									`${mappingKey}::${newCard.id}`,
+									isCheckedInObsidian,
+								);
 							} catch (err: unknown) {
 								const errMsg =
 									err instanceof Error
@@ -321,24 +336,51 @@ export default class TrelloSyncPlugin extends Plugin {
 					if (!currentCard) continue;
 
 					const isDoneInTrello = !!currentCard.dueComplete;
+					const statusKey = `${mappingKey}::${cardId}`;
+					const wasChecked = this.lastKnownCardStatus.get(statusKey);
 
 					if (isCheckedInObsidian !== isDoneInTrello) {
-						try {
-							await this.updateTrelloCardStatus(
-								cardId,
-								isCheckedInObsidian,
-							);
-							currentCard.dueComplete = isCheckedInObsidian;
-						} catch (err: unknown) {
-							const errMsg =
-								err instanceof Error
-									? err.message
-									: String(err);
-							console.error(
-								`Failed to update Trello card ${cardId}:`,
-								errMsg,
+						if (wasChecked !== undefined) {
+							const obsidianChanged =
+								isCheckedInObsidian !== wasChecked;
+							const trelloChanged = isDoneInTrello !== wasChecked;
+
+							if (obsidianChanged && !trelloChanged) {
+								try {
+									await this.updateTrelloCardStatus(
+										cardId,
+										isCheckedInObsidian,
+									);
+									currentCard.dueComplete =
+										isCheckedInObsidian;
+									this.lastKnownCardStatus.set(
+										statusKey,
+										isCheckedInObsidian,
+									);
+								} catch (err: unknown) {
+									const errMsg =
+										err instanceof Error
+											? err.message
+											: String(err);
+									console.error(
+										`Failed to update Trello card ${cardId}:`,
+										errMsg,
+									);
+								}
+							} else {
+								this.lastKnownCardStatus.set(
+									statusKey,
+									isDoneInTrello,
+								);
+							}
+						} else {
+							this.lastKnownCardStatus.set(
+								statusKey,
+								isDoneInTrello,
 							);
 						}
+					} else {
+						this.lastKnownCardStatus.set(statusKey, isDoneInTrello);
 					}
 				}
 
@@ -368,6 +410,10 @@ export default class TrelloSyncPlugin extends Plugin {
 						const isChecked = card.dueComplete ? 'x' : ' ';
 						trelloSection += `- [${isChecked}] ${card.name} <!-- id:${card.id} -->\n`;
 						knownCardIds.add(card.id);
+						this.lastKnownCardStatus.set(
+							`${mappingKey}::${card.id}`,
+							!!card.dueComplete,
+						);
 
 						if (card.desc && card.desc.trim() !== '') {
 							const indentedDesc = card.desc
@@ -425,6 +471,112 @@ export default class TrelloSyncPlugin extends Plugin {
 					'❌ Failed to sync Trello board. Check console for details.',
 				);
 			}
+		}
+	}
+
+	async syncFolderToTrelloList() {
+		const {
+			enableFolderToTrello,
+			folderToTrelloSourceFolder,
+			folderToTrelloBoardId,
+			folderToTrelloListId,
+			deleteBehavior,
+		} = this.settings;
+
+		if (
+			!enableFolderToTrello ||
+			!folderToTrelloSourceFolder ||
+			!folderToTrelloBoardId ||
+			!folderToTrelloListId
+		) {
+			return;
+		}
+
+		const sourceAbstract = this.app.vault.getAbstractFileByPath(
+			folderToTrelloSourceFolder,
+		);
+		if (!(sourceAbstract instanceof TFolder)) {
+			return;
+		}
+
+		try {
+			// 1. שליפת כל הכרטיסים בלוח וסינון הכרטיסים הפעילים בעמודה שנבחרה
+			const allCards = await this.getBoardCards(folderToTrelloBoardId);
+			const listCards = allCards.filter(
+				(c) => c.idList === folderToTrelloListId && !c.closed,
+			);
+
+			// מיפוי של שמות הכרטיסים הקיימים בטרלו
+			const trelloCardNamesMap = new Map<string, TrelloCard>();
+			for (const card of listCards) {
+				trelloCardNamesMap.set(card.name.trim().toLowerCase(), card);
+			}
+
+			// 2. איסוף כל הפתקים והתת-תיקיות הקיימים בתיקיית המקור באובסידיאן
+			const obsidianItemsMap = new Map<string, string>(); // normalizedName -> originalName
+			for (const child of sourceAbstract.children) {
+				let itemName = '';
+
+				if (child instanceof TFile && child.extension === 'md') {
+					itemName = child.basename;
+				} else if (child instanceof TFolder) {
+					itemName = child.name;
+				}
+
+				if (itemName) {
+					obsidianItemsMap.set(
+						itemName.trim().toLowerCase(),
+						itemName,
+					);
+				}
+			}
+
+			// 3. הסרה/ארכוב של כרטיסים בטרלו שאינם קיימים עוד בתיקייה באובסידיאן
+			for (const card of listCards) {
+				const normalizedCardName = card.name.trim().toLowerCase();
+				if (!obsidianItemsMap.has(normalizedCardName)) {
+					try {
+						if (deleteBehavior === 'delete') {
+							await this.deleteTrelloCard(card.id);
+						} else {
+							await this.archiveTrelloCard(card.id);
+						}
+					} catch (err: unknown) {
+						const errMsg =
+							err instanceof Error ? err.message : String(err);
+						console.error(
+							`Failed to remove/archive card "${card.name}" in Trello:`,
+							errMsg,
+						);
+					}
+				}
+			}
+
+			// 4. יצירת כרטיסים חדשים בטרלו עבור פריטים חדשים שנוספו באובסידיאן
+			for (const [
+				normalizedName,
+				originalName,
+			] of obsidianItemsMap.entries()) {
+				if (!trelloCardNamesMap.has(normalizedName)) {
+					try {
+						await this.createTrelloCard(
+							originalName,
+							folderToTrelloListId,
+						);
+					} catch (err: unknown) {
+						const errMsg =
+							err instanceof Error ? err.message : String(err);
+						console.error(
+							`Failed to create Trello card for "${originalName}":`,
+							errMsg,
+						);
+					}
+				}
+			}
+		} catch (error: unknown) {
+			const errorMessage =
+				error instanceof Error ? error.message : String(error);
+			console.error('Folder to Trello Sync Error:', errorMessage);
 		}
 	}
 

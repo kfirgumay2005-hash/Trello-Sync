@@ -1,5 +1,5 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
-import TrelloSyncPlugin from './main';
+import { App, PluginSettingTab, Setting, TFolder } from 'obsidian';
+import TrelloSyncPlugin, { TrelloBoard } from './main';
 
 export interface BoardMapping {
 	boardId: string;
@@ -12,6 +12,12 @@ export interface TrelloPluginSettings {
 	syncIntervalSeconds: number;
 	deleteBehavior: 'delete' | 'archive';
 	boardMappings: BoardMapping[];
+
+	// Folder to Trello List Settings
+	enableFolderToTrello: boolean;
+	folderToTrelloSourceFolder: string;
+	folderToTrelloBoardId: string;
+	folderToTrelloListId: string;
 }
 
 export const DEFAULT_SETTINGS: TrelloPluginSettings = {
@@ -20,6 +26,11 @@ export const DEFAULT_SETTINGS: TrelloPluginSettings = {
 	syncIntervalSeconds: 30,
 	deleteBehavior: 'archive',
 	boardMappings: [],
+
+	enableFolderToTrello: false,
+	folderToTrelloSourceFolder: '',
+	folderToTrelloBoardId: '',
+	folderToTrelloListId: '',
 };
 
 export class TrelloSyncSettingTab extends PluginSettingTab {
@@ -108,7 +119,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						}
 					});
 
-				// Standard DOM element modification to avoid no-unsupported-api warnings
 				button.buttonEl.disabled = currentMappingsCount >= 10;
 			});
 
@@ -120,7 +130,7 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 		}
 
 		void Promise.all([
-			this.plugin.getTrelloBoards().catch(() => []),
+			this.plugin.getTrelloBoards().catch(() => [] as TrelloBoard[]),
 			Promise.resolve(this.app.vault.getMarkdownFiles()),
 		]).then(([boards, markdownFiles]) => {
 			this.plugin.settings.boardMappings.forEach((mapping, index) => {
@@ -162,7 +172,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						this.display();
 					});
 
-					// Standard DOM modifications to avoid no-unsupported-api warnings
 					button.buttonEl.addClass('mod-warning');
 					button.buttonEl.setAttribute(
 						'aria-label',
@@ -170,6 +179,104 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					);
 				});
 			});
+
+			// --- Folder to Trello List Section ---
+			new Setting(containerEl)
+				.setName('Auto-Add Folder Items names to a Trello List')
+				.setHeading();
+
+			new Setting(containerEl)
+				.setName('Sync all Subfolders and Notes names to a list ')
+				.setDesc(
+					'If you have a Projects folder then everytime you move notes and folders from or into it , the plugin will update it in a trello list you choose ',
+				)
+				.addToggle((toggle) =>
+					toggle
+						.setValue(this.plugin.settings.enableFolderToTrello)
+						.onChange(async (value) => {
+							this.plugin.settings.enableFolderToTrello = value;
+							await this.plugin.saveSettings();
+							this.display();
+						}),
+				);
+
+			if (this.plugin.settings.enableFolderToTrello) {
+				const allFolders = this.app.vault
+					.getAllLoadedFiles()
+					.filter((f): f is TFolder => f instanceof TFolder);
+
+				new Setting(containerEl)
+					.setName('Source Obsidian Folder')
+					.setDesc(
+						'Select the folder whose contents will be added to Trello',
+					)
+					.addDropdown((dropdown) => {
+						dropdown.addOption('', '-- Select Folder --');
+						allFolders.forEach((folder) => {
+							dropdown.addOption(
+								folder.path,
+								folder.path === '/'
+									? 'Vault Root (/)'
+									: folder.path,
+							);
+						});
+						dropdown.setValue(
+							this.plugin.settings.folderToTrelloSourceFolder,
+						);
+						dropdown.onChange(async (value) => {
+							this.plugin.settings.folderToTrelloSourceFolder =
+								value;
+							await this.plugin.saveSettings();
+						});
+					});
+
+				const selectedBoardId =
+					this.plugin.settings.folderToTrelloBoardId;
+
+				new Setting(containerEl)
+					.setName('Target Trello Board')
+					.setDesc('Select the Trello board')
+					.addDropdown((dropdown) => {
+						dropdown.addOption('', '-- Select Board --');
+						boards.forEach((board) => {
+							dropdown.addOption(board.id, board.name);
+						});
+						dropdown.setValue(selectedBoardId);
+						dropdown.onChange(async (value) => {
+							this.plugin.settings.folderToTrelloBoardId = value;
+							this.plugin.settings.folderToTrelloListId = ''; // Reset list selection when board changes
+							await this.plugin.saveSettings();
+							this.display();
+						});
+					});
+
+				if (selectedBoardId) {
+					void this.plugin
+						.getBoardLists(selectedBoardId)
+						.then((lists) => {
+							new Setting(containerEl)
+								.setName('Target Trello List (Column)')
+								.setDesc(
+									'Select the list/column where new cards will be created',
+								)
+								.addDropdown((dropdown) => {
+									dropdown.addOption('', '-- Select List --');
+									lists.forEach((list) => {
+										dropdown.addOption(list.id, list.name);
+									});
+									dropdown.setValue(
+										this.plugin.settings
+											.folderToTrelloListId,
+									);
+									dropdown.onChange(async (value) => {
+										this.plugin.settings.folderToTrelloListId =
+											value;
+										await this.plugin.saveSettings();
+									});
+								});
+						});
+				}
+			}
 		});
 
 		// --- Preferences & Sync Interval ---
