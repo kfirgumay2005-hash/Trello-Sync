@@ -1,5 +1,6 @@
 import { Notice, Plugin, requestUrl, TFile } from 'obsidian';
 import {
+	BoardMapping,
 	DEFAULT_SETTINGS,
 	TrelloPluginSettings,
 	TrelloSyncSettingTab,
@@ -8,6 +9,7 @@ import {
 export interface TrelloBoard {
 	id: string;
 	name: string;
+	closed?: boolean;
 }
 
 export interface TrelloList {
@@ -27,20 +29,20 @@ export interface TrelloCard {
 export default class TrelloSyncPlugin extends Plugin {
 	settings!: TrelloPluginSettings;
 	syncTimerId: number | null = null;
-	knownCardIds: Set<string> = new Set();
+	knownCardIdsByMapping: Map<string, Set<string>> = new Map();
 
 	async onload() {
 		await this.loadSettings();
 
-		this.addRibbonIcon('folder-sync', 'Sync Trello Board', () => {
-			void this.syncSelectedBoard();
+		this.addRibbonIcon('folder-sync', 'Sync Trello Boards', () => {
+			void this.syncAllBoards();
 		});
 
 		this.addCommand({
 			id: 'sync-trello-board',
-			name: 'Sync Selected Trello Board',
+			name: 'Sync Selected Trello Boards',
 			callback: () => {
-				void this.syncSelectedBoard();
+				void this.syncAllBoards();
 			},
 		});
 
@@ -70,14 +72,15 @@ export default class TrelloSyncPlugin extends Plugin {
 
 		this.syncTimerId = this.registerInterval(
 			window.setInterval(() => {
-				void this.syncSelectedBoard(true);
+				void this.syncAllBoards(true);
 			}, intervalMs),
 		);
 	}
 
 	async getTrelloBoards(): Promise<TrelloBoard[]> {
 		const { apiKey, apiToken } = this.settings;
-		const url = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${apiToken}&fields=name,id`;
+		// Added filter=open & fields=name,id,closed to only pull active (open) boards
+		const url = `https://api.trello.com/1/members/me/boards?key=${apiKey}&token=${apiToken}&fields=name,id,closed&filter=open`;
 
 		const response = await requestUrl({
 			url: url,
@@ -85,7 +88,8 @@ export default class TrelloSyncPlugin extends Plugin {
 			headers: { Accept: 'application/json' },
 		});
 
-		return response.json as TrelloBoard[];
+		const boards = response.json as TrelloBoard[];
+		return boards.filter((board) => !board.closed);
 	}
 
 	async getBoardLists(boardId: string): Promise<TrelloList[]> {
@@ -160,10 +164,9 @@ export default class TrelloSyncPlugin extends Plugin {
 		});
 	}
 
-	private getTargetFile(): TFile | null {
-		const targetPath = this.settings.targetNotePath;
-		if (targetPath) {
-			const file = this.app.vault.getAbstractFileByPath(targetPath);
+	private getTargetFile(path: string): TFile | null {
+		if (path) {
+			const file = this.app.vault.getAbstractFileByPath(path);
 			if (file instanceof TFile) {
 				return file;
 			}
@@ -171,37 +174,51 @@ export default class TrelloSyncPlugin extends Plugin {
 		return null;
 	}
 
-	async syncSelectedBoard(isBackground = false) {
-		const { apiKey, apiToken, selectedBoardId, deleteBehavior } =
-			this.settings;
+	async syncAllBoards(isBackground = false) {
+		const { apiKey, apiToken, boardMappings } = this.settings;
 
-		if (!apiKey || !apiToken || !selectedBoardId) {
+		if (!apiKey || !apiToken || boardMappings.length === 0) {
 			if (!isBackground) {
 				new Notice(
-					'⚠️ Please configure API credentials and Board in settings.',
+					'⚠️ Please configure API credentials and board mappings in settings.',
 				);
 			}
 			return;
 		}
 
 		if (!isBackground) {
-			new Notice('Syncing Trello board...');
+			new Notice('Syncing Trello boards...');
 		}
+
+		for (const mapping of boardMappings) {
+			if (mapping && mapping.boardId) {
+				await this.syncSingleMapping(mapping, isBackground);
+			}
+		}
+	}
+
+	async syncSingleMapping(mapping: BoardMapping, isBackground: boolean) {
+		const { deleteBehavior } = this.settings;
+		const boardId = mapping.boardId;
+		const mappingKey = `${boardId}::${mapping.targetNotePath}`;
 
 		try {
 			const boards = await this.getTrelloBoards();
-			const currentBoard = boards.find((b) => b.id === selectedBoardId);
+			const currentBoard = boards.find((b) => b.id === boardId);
 			const boardName = currentBoard ? currentBoard.name : 'Trello Board';
 
-			const existingFile = this.getTargetFile();
+			const existingFile = this.getTargetFile(mapping.targetNotePath);
 
-			const lists = await this.getBoardLists(selectedBoardId);
-			let cards = await this.getBoardCards(selectedBoardId);
+			const lists = await this.getBoardLists(boardId);
+			let cards = await this.getBoardCards(boardId);
 
 			const defaultFallbackListId = lists[0]?.id || '';
 
 			let existingContent = '';
 			let extraUserContent = '';
+
+			let knownCardIds =
+				this.knownCardIdsByMapping.get(mappingKey) || new Set<string>();
 
 			if (existingFile) {
 				existingContent = await this.app.vault.read(existingFile);
@@ -218,8 +235,8 @@ export default class TrelloSyncPlugin extends Plugin {
 					}
 				}
 
-				if (this.knownCardIds.size > 0) {
-					for (const knownId of this.knownCardIds) {
+				if (knownCardIds.size > 0) {
+					for (const knownId of knownCardIds) {
 						if (!presentCardIds.has(knownId)) {
 							try {
 								if (deleteBehavior === 'delete') {
@@ -242,7 +259,7 @@ export default class TrelloSyncPlugin extends Plugin {
 					}
 				}
 
-				this.knownCardIds = presentCardIds;
+				knownCardIds = presentCardIds;
 
 				const lines = existingContent.split('\n');
 				let currentListId = defaultFallbackListId;
@@ -275,7 +292,7 @@ export default class TrelloSyncPlugin extends Plugin {
 									currentListId,
 								);
 								cards.push(newCard);
-								this.knownCardIds.add(newCard.id);
+								knownCardIds.add(newCard.id);
 							} catch (err: unknown) {
 								const errMsg =
 									err instanceof Error
@@ -327,10 +344,11 @@ export default class TrelloSyncPlugin extends Plugin {
 
 				const endMarker = '<!-- END TRELLO SYNC -->';
 				if (existingContent.includes(endMarker)) {
-					extraUserContent =
-						existingContent.split(endMarker)[1] || '';
-				} else {
-					extraUserContent = `\n${existingContent}`;
+					extraUserContent = (
+						existingContent.split(endMarker)[1] || ''
+					).replace(/^[\r\n]+/, '');
+				} else if (existingContent.trim()) {
+					extraUserContent = existingContent.replace(/^[\r\n]+/, '');
 				}
 			}
 
@@ -349,7 +367,7 @@ export default class TrelloSyncPlugin extends Plugin {
 					for (const card of listCards) {
 						const isChecked = card.dueComplete ? 'x' : ' ';
 						trelloSection += `- [${isChecked}] ${card.name} <!-- id:${card.id} -->\n`;
-						this.knownCardIds.add(card.id);
+						knownCardIds.add(card.id);
 
 						if (card.desc && card.desc.trim() !== '') {
 							const indentedDesc = card.desc
@@ -363,23 +381,20 @@ export default class TrelloSyncPlugin extends Plugin {
 				}
 			}
 
-			trelloSection += `<!-- END TRELLO SYNC -->\n`;
+			trelloSection += `<!-- END TRELLO SYNC -->`;
+
+			this.knownCardIdsByMapping.set(mappingKey, knownCardIds);
 
 			const fullMarkdownContent = extraUserContent
-				? `${trelloSection}${extraUserContent}`
-				: trelloSection;
+				? `${trelloSection}\n\n${extraUserContent}`
+				: `${trelloSection}\n`;
 
 			let targetFile: TFile;
 			if (existingFile) {
 				await this.app.vault.modify(existingFile, fullMarkdownContent);
 				targetFile = existingFile;
-				if (!isBackground) {
-					new Notice(
-						`✅ Updated existing note: ${existingFile.name}`,
-					);
-				}
 			} else {
-				const fileName = 'Trello sync.md';
+				const fileName = `Trello - ${boardName}.md`;
 				const fallback = this.app.vault.getAbstractFileByPath(fileName);
 
 				if (fallback instanceof TFile) {
@@ -392,19 +407,16 @@ export default class TrelloSyncPlugin extends Plugin {
 					);
 				}
 
-				this.settings.targetNotePath = targetFile.path;
+				mapping.targetNotePath = targetFile.path;
 				await this.saveSettings();
-
-				if (!isBackground) {
-					new Notice(`✅ Created new note: ${fileName}`);
-				}
 			}
 
 			if (!isBackground) {
-				await this.app.workspace.getLeaf().openFile(targetFile);
+				new Notice(
+					`✅ Synced board "${boardName}" to note: ${targetFile.name}`,
+				);
 			}
 		} catch (error: unknown) {
-			// Solves the warning: "Unsafe assignment of an error or any typed value"
 			const errorMessage =
 				error instanceof Error ? error.message : String(error);
 			console.error('Trello Sync Error:', errorMessage);
@@ -417,9 +429,25 @@ export default class TrelloSyncPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const loadedData =
-			(await this.loadData()) as Partial<TrelloPluginSettings> | null;
+		const loadedData = (await this.loadData()) as Record<
+			string,
+			unknown
+		> | null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+
+		if (!this.settings.boardMappings) {
+			this.settings.boardMappings = [];
+		}
+
+		if (
+			loadedData?.selectedBoardId &&
+			this.settings.boardMappings.length === 0
+		) {
+			this.settings.boardMappings.push({
+				boardId: String(loadedData.selectedBoardId),
+				targetNotePath: String(loadedData.targetNotePath || ''),
+			});
+		}
 	}
 
 	async saveSettings() {

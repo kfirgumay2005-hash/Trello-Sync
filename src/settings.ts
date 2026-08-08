@@ -1,22 +1,25 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import TrelloSyncPlugin from './main';
 
+export interface BoardMapping {
+	boardId: string;
+	targetNotePath: string;
+}
+
 export interface TrelloPluginSettings {
 	apiKey: string;
 	apiToken: string;
-	selectedBoardId: string;
 	syncIntervalSeconds: number;
-	targetNotePath: string;
 	deleteBehavior: 'delete' | 'archive';
+	boardMappings: BoardMapping[];
 }
 
 export const DEFAULT_SETTINGS: TrelloPluginSettings = {
 	apiKey: '',
 	apiToken: '',
-	selectedBoardId: '',
 	syncIntervalSeconds: 30,
-	targetNotePath: '',
 	deleteBehavior: 'archive',
+	boardMappings: [],
 };
 
 export class TrelloSyncSettingTab extends PluginSettingTab {
@@ -27,20 +30,17 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	// Solves the warning: "This PluginSettingTab does not implement getSettingDefinitions()"
 	getSettingDefinitions() {
 		return [];
 	}
 
 	display(): void {
 		const { containerEl } = this;
-
 		containerEl.empty();
 
-		// Section Heading without the word
+		// --- Trello Connection ---
 		new Setting(containerEl).setName('Trello Connection').setHeading();
 
-		// API Key Setting
 		new Setting(containerEl)
 			.setName('Trello API Key')
 			.setDesc('Enter your Trello API Key')
@@ -62,7 +62,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// API Token Setting
 		new Setting(containerEl)
 			.setName('Trello API Token')
 			.setDesc('Enter your Trello API Token')
@@ -84,83 +83,93 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// Section Heading without the word
-		new Setting(containerEl).setName('Board & Sync').setHeading();
+		// --- Board & Note Mappings ---
+		new Setting(containerEl).setName('Board & Note Mappings').setHeading();
 
-		// Board Selection Dropdown
-		const boardSetting = new Setting(containerEl)
-			.setName('Select Trello Board')
-			.setDesc('Select the board you want to sync with Obsidian');
+		const currentMappingsCount = this.plugin.settings.boardMappings.length;
+
+		new Setting(containerEl)
+			.setName('Add Board Mapping')
+			.setDesc(
+				`Map up to 10 Trello boards to Obsidian notes (Current: ${currentMappingsCount}/10)`,
+			)
+			.addButton((button) => {
+				button
+					.setButtonText('+ Add New Mapping')
+					.setCta()
+					.setDisabled(currentMappingsCount >= 10)
+					.onClick(async () => {
+						if (this.plugin.settings.boardMappings.length < 10) {
+							this.plugin.settings.boardMappings.push({
+								boardId: '',
+								targetNotePath: '',
+							});
+							await this.plugin.saveSettings();
+							this.display();
+						}
+					});
+			});
 
 		if (!this.plugin.settings.apiKey || !this.plugin.settings.apiToken) {
-			boardSetting.setDesc(
-				'⚠️ Please enter a valid API Key and Token to load boards.',
+			new Setting(containerEl).setDesc(
+				'⚠️ Please enter a valid API Key and Token to configure mappings.',
 			);
 			return;
 		}
 
-		void this.plugin
-			.getTrelloBoards()
-			.then((boards) => {
-				if (!boards || boards.length === 0) {
-					boardSetting.setDesc(
-						'No boards found in your Trello account.',
-					);
-					return;
-				}
+		void Promise.all([
+			this.plugin.getTrelloBoards().catch(() => []),
+			Promise.resolve(this.app.vault.getMarkdownFiles()),
+		]).then(([boards, markdownFiles]) => {
+			this.plugin.settings.boardMappings.forEach((mapping, index) => {
+				const setting = new Setting(containerEl).setName(
+					`Mapping #${index + 1}`,
+				);
 
-				boardSetting.addDropdown((dropdown) => {
-					dropdown.addOption('', '-- Select a Board --');
-
+				// Dropdown 1: Trello Board
+				setting.addDropdown((dropdown) => {
+					dropdown.addOption('', '-- Select Board --');
 					boards.forEach((board) => {
 						dropdown.addOption(board.id, board.name);
 					});
-
-					dropdown.setValue(this.plugin.settings.selectedBoardId);
-
-					dropdown.onChange((value) => {
-						this.plugin.settings.selectedBoardId = value;
-						void this.plugin.saveSettings().then(() => {
-							void this.plugin.syncSelectedBoard(true);
-						});
+					dropdown.setValue(mapping.boardId);
+					dropdown.onChange(async (value) => {
+						mapping.boardId = value;
+						await this.plugin.saveSettings();
 					});
 				});
-			})
-			.catch((error: unknown) => {
-				const errorMsg =
-					error instanceof Error ? error.message : String(error);
-				console.error('Failed to load boards in settings:', errorMsg);
-				boardSetting.setDesc(
-					'❌ Error loading boards. Please verify your API credentials.',
-				);
-			});
 
-		// Target Note Selection Dropdown
-		const noteSetting = new Setting(containerEl)
-			.setName('Select Target Note')
-			.setDesc(
-				'Choose an existing note to sync with, or select Create New Note',
-			);
+				// Dropdown 2: Target Note
+				setting.addDropdown((dropdown) => {
+					dropdown.addOption('', '+ Create new note');
+					markdownFiles.forEach((file) => {
+						dropdown.addOption(file.path, file.basename);
+					});
+					dropdown.setValue(mapping.targetNotePath);
+					dropdown.onChange(async (value) => {
+						mapping.targetNotePath = value;
+						await this.plugin.saveSettings();
+					});
+				});
 
-		const markdownFiles = this.app.vault.getMarkdownFiles();
-
-		noteSetting.addDropdown((dropdown) => {
-			dropdown.addOption('', '+ Create new note (Trello sync)');
-
-			markdownFiles.forEach((file) => {
-				dropdown.addOption(file.path, file.basename);
-			});
-
-			dropdown.setValue(this.plugin.settings.targetNotePath || '');
-
-			dropdown.onChange((value) => {
-				this.plugin.settings.targetNotePath = value;
-				void this.plugin.saveSettings();
-				this.plugin.knownCardIds.clear();
+				// Delete Button
+				setting.addButton((button) => {
+					button
+						.setIcon('trash')
+						.setTooltip('Remove this mapping')
+						.setWarning()
+						.onClick(async () => {
+							this.plugin.settings.boardMappings.splice(index, 1);
+							await this.plugin.saveSettings();
+							this.display();
+						});
+				});
 			});
 		});
 
-		// Deletion Behavior Dropdown
+		// --- Preferences & Sync Interval ---
+		new Setting(containerEl).setName('Sync Preferences').setHeading();
+
 		new Setting(containerEl)
 			.setName('Deletion Behavior')
 			.setDesc(
@@ -172,11 +181,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					'delete',
 					'Permanently Delete Card in Trello',
 				);
-
 				dropdown.setValue(
 					this.plugin.settings.deleteBehavior || 'archive',
 				);
-
 				dropdown.onChange((value) => {
 					this.plugin.settings.deleteBehavior = value as
 						| 'delete'
@@ -185,7 +192,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				});
 			});
 
-		// Sync Interval Setting
 		new Setting(containerEl)
 			.setName('Auto-Sync Interval (Seconds)')
 			.setDesc(
