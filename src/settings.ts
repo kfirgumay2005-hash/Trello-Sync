@@ -97,7 +97,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				button
 					.setButtonText('+ Add New Mapping')
 					.setCta()
-					.setDisabled(currentMappingsCount >= 10)
 					.onClick(async () => {
 						if (this.plugin.settings.boardMappings.length < 10) {
 							this.plugin.settings.boardMappings.push({
@@ -108,6 +107,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 							this.display();
 						}
 					});
+
+				// Standard DOM element modification to avoid no-unsupported-api warnings
+				button.buttonEl.disabled = currentMappingsCount >= 10;
 			});
 
 		if (!this.plugin.settings.apiKey || !this.plugin.settings.apiToken) {
@@ -154,15 +156,18 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 				// Delete Button
 				setting.addButton((button) => {
-					button
-						.setIcon('trash')
-						.setTooltip('Remove this mapping')
-						.setWarning()
-						.onClick(async () => {
-							this.plugin.settings.boardMappings.splice(index, 1);
-							await this.plugin.saveSettings();
-							this.display();
-						});
+					button.setIcon('trash').onClick(async () => {
+						this.plugin.settings.boardMappings.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.display();
+					});
+
+					// Standard DOM modifications to avoid no-unsupported-api warnings
+					button.buttonEl.addClass('mod-warning');
+					button.buttonEl.setAttribute(
+						'aria-label',
+						'Remove this mapping',
+					);
 				});
 			});
 		});
