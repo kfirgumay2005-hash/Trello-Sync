@@ -1,9 +1,24 @@
 import { App, PluginSettingTab, Setting, TFolder } from 'obsidian';
-import TrelloSyncPlugin, { TrelloBoard } from './main';
+import TrelloSyncPlugin, { TrelloBoard, TrelloList } from './main';
+
+export interface ListAutomation {
+	sourceListId: string;
+	targetListId: string;
+}
 
 export interface BoardMapping {
 	boardId: string;
 	targetNotePath: string;
+	enableMoveOnCheck?: boolean;
+	automations?: ListAutomation[];
+	moveSourceListId?: string;
+	moveTargetListId?: string;
+}
+
+export interface TagAutomation {
+	tag: string;
+	boardId: string;
+	listId: string;
 }
 
 export interface TrelloPluginSettings {
@@ -13,11 +28,12 @@ export interface TrelloPluginSettings {
 	deleteBehavior: 'delete' | 'archive';
 	boardMappings: BoardMapping[];
 
-	// Folder to Trello List Settings
 	enableFolderToTrello: boolean;
 	folderToTrelloSourceFolder: string;
 	folderToTrelloBoardId: string;
 	folderToTrelloListId: string;
+
+	tagAutomations: TagAutomation[];
 }
 
 export const DEFAULT_SETTINGS: TrelloPluginSettings = {
@@ -31,6 +47,8 @@ export const DEFAULT_SETTINGS: TrelloPluginSettings = {
 	folderToTrelloSourceFolder: '',
 	folderToTrelloBoardId: '',
 	folderToTrelloListId: '',
+
+	tagAutomations: [],
 };
 
 export class TrelloSyncSettingTab extends PluginSettingTab {
@@ -113,6 +131,7 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 							this.plugin.settings.boardMappings.push({
 								boardId: '',
 								targetNotePath: '',
+								automations: [],
 							});
 							await this.plugin.saveSettings();
 							this.display();
@@ -132,13 +151,34 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 		void Promise.all([
 			this.plugin.getTrelloBoards().catch(() => [] as TrelloBoard[]),
 			Promise.resolve(this.app.vault.getMarkdownFiles()),
-		]).then(([boards, markdownFiles]) => {
+		]).then(async ([boards, markdownFiles]) => {
+			const listsByBoard = new Map<string, TrelloList[]>();
+
+			for (const mapping of this.plugin.settings.boardMappings) {
+				if (mapping.boardId && !listsByBoard.has(mapping.boardId)) {
+					const lists = await this.plugin
+						.getBoardLists(mapping.boardId)
+						.catch(() => []);
+					listsByBoard.set(mapping.boardId, lists);
+				}
+			}
+
+			if (this.plugin.settings.tagAutomations) {
+				for (const auto of this.plugin.settings.tagAutomations) {
+					if (auto.boardId && !listsByBoard.has(auto.boardId)) {
+						const lists = await this.plugin
+							.getBoardLists(auto.boardId)
+							.catch(() => []);
+						listsByBoard.set(auto.boardId, lists);
+					}
+				}
+			}
+
 			this.plugin.settings.boardMappings.forEach((mapping, index) => {
 				const setting = new Setting(containerEl).setName(
 					`Mapping #${index + 1}`,
 				);
 
-				// Dropdown 1: Trello Board
 				setting.addDropdown((dropdown) => {
 					dropdown.addOption('', '-- Select Board --');
 					boards.forEach((board) => {
@@ -148,10 +188,10 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					dropdown.onChange(async (value) => {
 						mapping.boardId = value;
 						await this.plugin.saveSettings();
+						this.display();
 					});
 				});
 
-				// Dropdown 2: Target Note
 				setting.addDropdown((dropdown) => {
 					dropdown.addOption('', '+ Create new note');
 					markdownFiles.forEach((file) => {
@@ -164,21 +204,198 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					});
 				});
 
-				// Delete Button
 				setting.addButton((button) => {
 					button.setIcon('trash').onClick(async () => {
 						this.plugin.settings.boardMappings.splice(index, 1);
 						await this.plugin.saveSettings();
 						this.display();
 					});
-
 					button.buttonEl.addClass('mod-warning');
 					button.buttonEl.setAttribute(
 						'aria-label',
 						'Remove this mapping',
 					);
 				});
+
+				const automationSetting = new Setting(containerEl)
+					.setName(`Checkbox Automation (Mapping #${index + 1})`)
+					.setDesc(
+						'Move card to another column when checked / unchecked',
+					);
+
+				automationSetting.addToggle((toggle) => {
+					toggle
+						.setValue(mapping.enableMoveOnCheck || false)
+						.onChange(async (value) => {
+							mapping.enableMoveOnCheck = value;
+							if (value && !mapping.automations) {
+								mapping.automations = [];
+							}
+							await this.plugin.saveSettings();
+							this.display();
+						});
+				});
+
+				if (mapping.enableMoveOnCheck && mapping.boardId) {
+					const lists = listsByBoard.get(mapping.boardId) || [];
+
+					mapping.automations?.forEach((automation, autoIndex) => {
+						const ruleSetting = new Setting(containerEl)
+							.setName(`Rule #${autoIndex + 1}`)
+							.addDropdown((dropdown) => {
+								dropdown.addOption('', '-- Source List --');
+								lists.forEach((list) =>
+									dropdown.addOption(list.id, list.name),
+								);
+								dropdown.setValue(
+									automation.sourceListId || '',
+								);
+								dropdown.onChange(async (value) => {
+									automation.sourceListId = value;
+									await this.plugin.saveSettings();
+								});
+							})
+							.addDropdown((dropdown) => {
+								dropdown.addOption(
+									'',
+									'-- Target List (Done) --',
+								);
+								lists.forEach((list) =>
+									dropdown.addOption(list.id, list.name),
+								);
+								dropdown.setValue(
+									automation.targetListId || '',
+								);
+								dropdown.onChange(async (value) => {
+									automation.targetListId = value;
+									await this.plugin.saveSettings();
+								});
+							})
+							.addButton((button) => {
+								button.setIcon('x-circle').onClick(async () => {
+									mapping.automations!.splice(autoIndex, 1);
+									await this.plugin.saveSettings();
+									this.display();
+								});
+								button.buttonEl.setAttribute(
+									'aria-label',
+									'Remove Rule',
+								);
+							});
+
+						ruleSetting.settingEl.style.borderTop = 'none';
+						ruleSetting.settingEl.style.paddingTop = '0';
+					});
+
+					const addRuleSetting = new Setting(containerEl);
+					addRuleSetting.settingEl.style.borderTop = 'none';
+					addRuleSetting.addButton((button) => {
+						button
+							.setButtonText('+ Add Automation Rule')
+							.onClick(async () => {
+								if (!mapping.automations)
+									mapping.automations = [];
+								mapping.automations.push({
+									sourceListId: '',
+									targetListId: '',
+								});
+								await this.plugin.saveSettings();
+								this.display();
+							});
+					});
+				}
 			});
+
+			// --- Tag Automations ---
+			new Setting(containerEl)
+				.setName('Auto-Add Tagged Notes to Trello')
+				.setHeading();
+
+			// Bypass TS missing method with (as any)
+			const allObsidianTags = Object.keys(
+				(this.app.metadataCache as any).getTags?.() || {},
+			);
+
+			new Setting(containerEl)
+				.setName('Add Tag Automation')
+				.setDesc(
+					'Create Trello cards automatically for notes with a specific tag.',
+				)
+				.addButton((button) => {
+					button
+						.setButtonText('+ Add Tag Rule')
+						.setCta()
+						.onClick(async () => {
+							if (!this.plugin.settings.tagAutomations) {
+								this.plugin.settings.tagAutomations = [];
+							}
+							this.plugin.settings.tagAutomations.push({
+								tag: '',
+								boardId: '',
+								listId: '',
+							});
+							await this.plugin.saveSettings();
+							this.display();
+						});
+				});
+
+			if (
+				this.plugin.settings.tagAutomations &&
+				this.plugin.settings.tagAutomations.length > 0
+			) {
+				this.plugin.settings.tagAutomations.forEach((rule, index) => {
+					const ruleSetting = new Setting(containerEl).setName(
+						`Tag Rule #${index + 1}`,
+					);
+
+					ruleSetting.addDropdown((drop) => {
+						drop.addOption('', '-- Select Tag --');
+						allObsidianTags.forEach((t) => drop.addOption(t, t));
+						drop.setValue(rule.tag);
+						drop.onChange(async (val) => {
+							rule.tag = val;
+							await this.plugin.saveSettings();
+						});
+					});
+
+					ruleSetting.addDropdown((drop) => {
+						drop.addOption('', '-- Board --');
+						boards.forEach((b) => drop.addOption(b.id, b.name));
+						drop.setValue(rule.boardId);
+						drop.onChange(async (val) => {
+							rule.boardId = val;
+							rule.listId = '';
+							await this.plugin.saveSettings();
+							this.display();
+						});
+					});
+
+					const lists = rule.boardId
+						? listsByBoard.get(rule.boardId) || []
+						: [];
+					ruleSetting.addDropdown((drop) => {
+						drop.addOption('', '-- List --');
+						lists.forEach((l) => drop.addOption(l.id, l.name));
+						drop.setValue(rule.listId);
+						drop.onChange(async (val) => {
+							rule.listId = val;
+							await this.plugin.saveSettings();
+						});
+					});
+
+					ruleSetting.addButton((btn) => {
+						btn.setIcon('trash').onClick(async () => {
+							this.plugin.settings.tagAutomations.splice(
+								index,
+								1,
+							);
+							await this.plugin.saveSettings();
+							this.display();
+						});
+						btn.buttonEl.addClass('mod-warning');
+					});
+				});
+			}
 
 			// --- Folder to Trello List Section ---
 			new Setting(containerEl)
@@ -188,7 +405,7 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 			new Setting(containerEl)
 				.setName('Sync all Subfolders and Notes names to a list ')
 				.setDesc(
-					'If you have a Projects folder then everytime you move notes and folders from or into it , the plugin will update it in a trello list you choose ',
+					'If you have a Projects folder for example then everytime you move notes and folders from or into it , the plugin will update it in a trello list you choose ',
 				)
 				.addToggle((toggle) =>
 					toggle
@@ -207,9 +424,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 				new Setting(containerEl)
 					.setName('Source Obsidian Folder')
-					.setDesc(
-						'Select the folder whose contents will be added to Trello',
-					)
 					.addDropdown((dropdown) => {
 						dropdown.addOption('', '-- Select Folder --');
 						allFolders.forEach((folder) => {
@@ -235,16 +449,15 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 				new Setting(containerEl)
 					.setName('Target Trello Board')
-					.setDesc('Select the Trello board')
 					.addDropdown((dropdown) => {
 						dropdown.addOption('', '-- Select Board --');
-						boards.forEach((board) => {
-							dropdown.addOption(board.id, board.name);
-						});
+						boards.forEach((board) =>
+							dropdown.addOption(board.id, board.name),
+						);
 						dropdown.setValue(selectedBoardId);
 						dropdown.onChange(async (value) => {
 							this.plugin.settings.folderToTrelloBoardId = value;
-							this.plugin.settings.folderToTrelloListId = ''; // Reset list selection when board changes
+							this.plugin.settings.folderToTrelloListId = '';
 							await this.plugin.saveSettings();
 							this.display();
 						});
@@ -256,14 +469,11 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						.then((lists) => {
 							new Setting(containerEl)
 								.setName('Target Trello List (Column)')
-								.setDesc(
-									'Select the list/column where new cards will be created',
-								)
 								.addDropdown((dropdown) => {
 									dropdown.addOption('', '-- Select List --');
-									lists.forEach((list) => {
-										dropdown.addOption(list.id, list.name);
-									});
+									lists.forEach((list) =>
+										dropdown.addOption(list.id, list.name),
+									);
 									dropdown.setValue(
 										this.plugin.settings
 											.folderToTrelloListId,
@@ -284,9 +494,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Deletion Behavior')
-			.setDesc(
-				'Choose what happens in Trello when a card is deleted from Obsidian',
-			)
 			.addDropdown((dropdown) => {
 				dropdown.addOption('archive', 'Archive (Close) Card in Trello');
 				dropdown.addOption(
@@ -306,9 +513,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Auto-Sync Interval (Seconds)')
-			.setDesc(
-				'Set how often (in seconds) Obsidian should sync with Trello',
-			)
 			.addText((text) =>
 				text
 					.setPlaceholder('30')
