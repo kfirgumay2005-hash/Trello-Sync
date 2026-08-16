@@ -329,6 +329,7 @@ export default class TrelloSyncPlugin extends Plugin {
 							} catch (err: unknown) {
 								console.error(
 									`Failed to remove/archive card ${knownId} in Trello.`,
+									err,
 								);
 							}
 						}
@@ -456,6 +457,7 @@ export default class TrelloSyncPlugin extends Plugin {
 							} catch (err: unknown) {
 								console.error(
 									`Failed to create card "${cardName}" in Trello.`,
+									err,
 								);
 							}
 						}
@@ -517,7 +519,13 @@ export default class TrelloSyncPlugin extends Plugin {
 					const lastTags =
 						this.lastKnownCardLabels.get(statusKey) || trelloTags;
 
-					let updateProps: any = {};
+					const updateProps: {
+						isComplete?: boolean;
+						targetListId?: string;
+						start?: string;
+						due?: string;
+						idLabels?: string[];
+					} = {};
 
 					if (obsStart !== lastDates.start)
 						updateProps.start = obsStart;
@@ -543,6 +551,7 @@ export default class TrelloSyncPlugin extends Plugin {
 						} catch (err) {
 							console.error(
 								`Failed to update labels for card ${cardId}`,
+								err,
 							);
 						}
 					} else if (trelloTagsChanged) {
@@ -631,6 +640,7 @@ export default class TrelloSyncPlugin extends Plugin {
 						} catch (err: unknown) {
 							console.error(
 								`Failed to update Trello card ${cardId}`,
+								err,
 							);
 						}
 					} else {
@@ -678,6 +688,7 @@ export default class TrelloSyncPlugin extends Plugin {
 						} catch (err: unknown) {
 							console.error(
 								`Failed to enforce list automation for card ${card.id}`,
+								err,
 							);
 						}
 					}
@@ -857,6 +868,7 @@ export default class TrelloSyncPlugin extends Plugin {
 					} catch (err: unknown) {
 						console.error(
 							`Failed to remove/archive card "${card.name}" in Trello`,
+							err,
 						);
 					}
 				}
@@ -875,6 +887,7 @@ export default class TrelloSyncPlugin extends Plugin {
 					} catch (err: unknown) {
 						console.error(
 							`Failed to create Trello card for "${originalName}"`,
+							err,
 						);
 					}
 				}
@@ -918,7 +931,10 @@ export default class TrelloSyncPlugin extends Plugin {
 				)
 					return true;
 
-				const fmTags = cache.frontmatter?.tags;
+				const fmTags = cache.frontmatter?.tags as
+					| string
+					| string[]
+					| undefined;
 				if (fmTags) {
 					const tagsArr = Array.isArray(fmTags) ? fmTags : [fmTags];
 					if (
@@ -968,6 +984,7 @@ export default class TrelloSyncPlugin extends Plugin {
 						} catch (err: unknown) {
 							console.error(
 								`Failed to remove/archive tagged card "${card.name}"`,
+								err,
 							);
 						}
 					}
@@ -992,6 +1009,7 @@ export default class TrelloSyncPlugin extends Plugin {
 						} catch (err: unknown) {
 							console.error(
 								`Failed to create Trello card for tagged note "${orig}"`,
+								err,
 							);
 						}
 					}
@@ -1070,13 +1088,15 @@ class CreateTrelloCardModal extends Modal {
 		new Setting(contentEl).setName('Board').addDropdown((drop) => {
 			drop.addOption('', '-- Select Board --');
 			this.boards.forEach((b) => drop.addOption(b.id, b.name));
-			drop.onChange(async (val) => {
-				this.selectedBoardId = val;
-				this.selectedListId = '';
-				this.lists = await this.plugin
-					.getBoardLists(val)
-					.catch(() => []);
-				this.renderListDropdown();
+			drop.onChange((val) => {
+				void (async () => {
+					this.selectedBoardId = val;
+					this.selectedListId = '';
+					this.lists = await this.plugin
+						.getBoardLists(val)
+						.catch(() => []);
+					this.renderListDropdown();
+				})();
 			});
 		});
 
@@ -1111,47 +1131,50 @@ class CreateTrelloCardModal extends Modal {
 			btn
 				.setButtonText('Create Card')
 				.setCta()
-				.onClick(async () => {
-					if (!this.selectedListId || !this.cardName) {
-						new Notice(
-							'Please select a list and enter a card name.',
-						);
-						return;
-					}
-					btn.setButtonText('Creating...').setDisabled(true);
-					try {
-						const newCard = await this.plugin.createTrelloCard(
-							this.cardName,
-							this.selectedListId,
-							this.startDate,
-							this.dueDate,
-						);
-
-						if (this.selectedTag && this.selectedBoardId) {
-							const boardLabels =
-								await this.plugin.getBoardLabels(
-									this.selectedBoardId,
-								);
-							const cleanTag = this.selectedTag
-								.replace('#', '')
-								.trim();
-							if (cleanTag) {
-								await this.plugin.syncCardLabels(
-									this.selectedBoardId,
-									newCard.id,
-									[cleanTag],
-									boardLabels,
-								);
-							}
+				.onClick(() => {
+					void (async () => {
+						if (!this.selectedListId || !this.cardName) {
+							new Notice(
+								'Please select a list and enter a card name.',
+							);
+							return;
 						}
+						btn.setButtonText('Creating...').setDisabled(true);
+						try {
+							const newCard = await this.plugin.createTrelloCard(
+								this.cardName,
+								this.selectedListId,
+								this.startDate,
+								this.dueDate,
+							);
 
-						new Notice('Trello Card Created!');
-						this.close();
-						void this.plugin.syncAllBoards(true);
-					} catch (e) {
-						new Notice('Failed to create card');
-						btn.setButtonText('Create Card').setDisabled(false);
-					}
+							if (this.selectedTag && this.selectedBoardId) {
+								const boardLabels =
+									await this.plugin.getBoardLabels(
+										this.selectedBoardId,
+									);
+								const cleanTag = this.selectedTag
+									.replace('#', '')
+									.trim();
+								if (cleanTag) {
+									await this.plugin.syncCardLabels(
+										this.selectedBoardId,
+										newCard.id,
+										[cleanTag],
+										boardLabels,
+									);
+								}
+							}
+
+							new Notice('Trello Card Created!');
+							this.close();
+							void this.plugin.syncAllBoards(true);
+						} catch (e) {
+							console.error('Failed to create card:', e);
+							new Notice('Failed to create card');
+							btn.setButtonText('Create Card').setDisabled(false);
+						}
+					})();
 				}),
 		);
 	}

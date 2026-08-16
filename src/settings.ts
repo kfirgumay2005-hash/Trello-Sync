@@ -51,6 +51,11 @@ export const DEFAULT_SETTINGS: TrelloPluginSettings = {
 	tagAutomations: [],
 };
 
+// Interface to type-safely access hidden Obsidian methods without using 'any'
+interface ExtendedMetadataCache {
+	getTags?(): Record<string, number>;
+}
+
 export class TrelloSyncSettingTab extends PluginSettingTab {
 	plugin: TrelloSyncPlugin;
 
@@ -126,15 +131,16 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				button
 					.setButtonText('+ Add New Mapping')
 					.setCta()
-					.onClick(async () => {
+					.onClick(() => {
 						if (this.plugin.settings.boardMappings.length < 10) {
 							this.plugin.settings.boardMappings.push({
 								boardId: '',
 								targetNotePath: '',
 								automations: [],
 							});
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						}
 					});
 
@@ -185,10 +191,11 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						dropdown.addOption(board.id, board.name);
 					});
 					dropdown.setValue(mapping.boardId);
-					dropdown.onChange(async (value) => {
+					dropdown.onChange((value) => {
 						mapping.boardId = value;
-						await this.plugin.saveSettings();
-						this.display();
+						void this.plugin.saveSettings().then(() => {
+							this.display();
+						});
 					});
 				});
 
@@ -198,17 +205,18 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						dropdown.addOption(file.path, file.basename);
 					});
 					dropdown.setValue(mapping.targetNotePath);
-					dropdown.onChange(async (value) => {
+					dropdown.onChange((value) => {
 						mapping.targetNotePath = value;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					});
 				});
 
 				setting.addButton((button) => {
-					button.setIcon('trash').onClick(async () => {
+					button.setIcon('trash').onClick(() => {
 						this.plugin.settings.boardMappings.splice(index, 1);
-						await this.plugin.saveSettings();
-						this.display();
+						void this.plugin.saveSettings().then(() => {
+							this.display();
+						});
 					});
 					button.buttonEl.addClass('mod-warning');
 					button.buttonEl.setAttribute(
@@ -226,13 +234,14 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				automationSetting.addToggle((toggle) => {
 					toggle
 						.setValue(mapping.enableMoveOnCheck || false)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							mapping.enableMoveOnCheck = value;
 							if (value && !mapping.automations) {
 								mapping.automations = [];
 							}
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						});
 				});
 
@@ -250,9 +259,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								dropdown.setValue(
 									automation.sourceListId || '',
 								);
-								dropdown.onChange(async (value) => {
+								dropdown.onChange((value) => {
 									automation.sourceListId = value;
-									await this.plugin.saveSettings();
+									void this.plugin.saveSettings();
 								});
 							})
 							.addDropdown((dropdown) => {
@@ -266,16 +275,17 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								dropdown.setValue(
 									automation.targetListId || '',
 								);
-								dropdown.onChange(async (value) => {
+								dropdown.onChange((value) => {
 									automation.targetListId = value;
-									await this.plugin.saveSettings();
+									void this.plugin.saveSettings();
 								});
 							})
 							.addButton((button) => {
-								button.setIcon('x-circle').onClick(async () => {
+								button.setIcon('x-circle').onClick(() => {
 									mapping.automations!.splice(autoIndex, 1);
-									await this.plugin.saveSettings();
-									this.display();
+									void this.plugin.saveSettings().then(() => {
+										this.display();
+									});
 								});
 								button.buttonEl.setAttribute(
 									'aria-label',
@@ -283,24 +293,31 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								);
 							});
 
-						ruleSetting.settingEl.style.borderTop = 'none';
-						ruleSetting.settingEl.style.paddingTop = '0';
+						// Fix for obsidianmd/no-static-styles-assignment
+						ruleSetting.settingEl.setCssStyles({
+							borderTop: 'none',
+							paddingTop: '0',
+						});
 					});
 
 					const addRuleSetting = new Setting(containerEl);
-					addRuleSetting.settingEl.style.borderTop = 'none';
+					// Fix for obsidianmd/no-static-styles-assignment
+					addRuleSetting.settingEl.setCssStyles({
+						borderTop: 'none',
+					});
 					addRuleSetting.addButton((button) => {
 						button
 							.setButtonText('+ Add Automation Rule')
-							.onClick(async () => {
+							.onClick(() => {
 								if (!mapping.automations)
 									mapping.automations = [];
 								mapping.automations.push({
 									sourceListId: '',
 									targetListId: '',
 								});
-								await this.plugin.saveSettings();
-								this.display();
+								void this.plugin.saveSettings().then(() => {
+									this.display();
+								});
 							});
 					});
 				}
@@ -311,10 +328,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				.setName('Auto-Add Tagged Notes to Trello')
 				.setHeading();
 
-			// Bypass TS missing method with (as any)
-			const allObsidianTags = Object.keys(
-				(this.app.metadataCache as any).getTags?.() || {},
-			);
+			const cache = this.app
+				.metadataCache as unknown as ExtendedMetadataCache;
+			const allObsidianTags = Object.keys(cache.getTags?.() || {});
 
 			new Setting(containerEl)
 				.setName('Add Tag Automation')
@@ -325,7 +341,7 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					button
 						.setButtonText('+ Add Tag Rule')
 						.setCta()
-						.onClick(async () => {
+						.onClick(() => {
 							if (!this.plugin.settings.tagAutomations) {
 								this.plugin.settings.tagAutomations = [];
 							}
@@ -334,8 +350,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								boardId: '',
 								listId: '',
 							});
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						});
 				});
 
@@ -352,9 +369,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						drop.addOption('', '-- Select Tag --');
 						allObsidianTags.forEach((t) => drop.addOption(t, t));
 						drop.setValue(rule.tag);
-						drop.onChange(async (val) => {
+						drop.onChange((val) => {
 							rule.tag = val;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						});
 					});
 
@@ -362,11 +379,12 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						drop.addOption('', '-- Board --');
 						boards.forEach((b) => drop.addOption(b.id, b.name));
 						drop.setValue(rule.boardId);
-						drop.onChange(async (val) => {
+						drop.onChange((val) => {
 							rule.boardId = val;
 							rule.listId = '';
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						});
 					});
 
@@ -377,20 +395,21 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						drop.addOption('', '-- List --');
 						lists.forEach((l) => drop.addOption(l.id, l.name));
 						drop.setValue(rule.listId);
-						drop.onChange(async (val) => {
+						drop.onChange((val) => {
 							rule.listId = val;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						});
 					});
 
 					ruleSetting.addButton((btn) => {
-						btn.setIcon('trash').onClick(async () => {
+						btn.setIcon('trash').onClick(() => {
 							this.plugin.settings.tagAutomations.splice(
 								index,
 								1,
 							);
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						});
 						btn.buttonEl.addClass('mod-warning');
 					});
@@ -410,10 +429,11 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 				.addToggle((toggle) =>
 					toggle
 						.setValue(this.plugin.settings.enableFolderToTrello)
-						.onChange(async (value) => {
+						.onChange((value) => {
 							this.plugin.settings.enableFolderToTrello = value;
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						}),
 				);
 
@@ -437,10 +457,10 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						dropdown.setValue(
 							this.plugin.settings.folderToTrelloSourceFolder,
 						);
-						dropdown.onChange(async (value) => {
+						dropdown.onChange((value) => {
 							this.plugin.settings.folderToTrelloSourceFolder =
 								value;
-							await this.plugin.saveSettings();
+							void this.plugin.saveSettings();
 						});
 					});
 
@@ -455,11 +475,12 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 							dropdown.addOption(board.id, board.name),
 						);
 						dropdown.setValue(selectedBoardId);
-						dropdown.onChange(async (value) => {
+						dropdown.onChange((value) => {
 							this.plugin.settings.folderToTrelloBoardId = value;
 							this.plugin.settings.folderToTrelloListId = '';
-							await this.plugin.saveSettings();
-							this.display();
+							void this.plugin.saveSettings().then(() => {
+								this.display();
+							});
 						});
 					});
 
@@ -478,10 +499,10 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 										this.plugin.settings
 											.folderToTrelloListId,
 									);
-									dropdown.onChange(async (value) => {
+									dropdown.onChange((value) => {
 										this.plugin.settings.folderToTrelloListId =
 											value;
-										await this.plugin.saveSettings();
+										void this.plugin.saveSettings();
 									});
 								});
 						});

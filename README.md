@@ -16,7 +16,7 @@ Add a Mapping and select the board you wish to sync and the note you wish to syn
 
 Set the auto-sync interval.
 
-### Features!
+## Features!
 
 1. Create new card: Press the button "Create Trello Card" with the + icon on the sidebar menu, or simply Add a checkbox to a list in the note you provided to add a new card to the board . Don't remove the Id near each card.
    Currently support Card name , Label/Tag , Start and Due Dates
