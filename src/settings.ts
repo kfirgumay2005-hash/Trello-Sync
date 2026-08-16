@@ -253,9 +253,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 							.setName(`Rule #${autoIndex + 1}`)
 							.addDropdown((dropdown) => {
 								dropdown.addOption('', '-- Source List --');
-								lists.forEach((list) =>
-									dropdown.addOption(list.id, list.name),
-								);
+								lists.forEach((list) => {
+									dropdown.addOption(list.id, list.name);
+								});
 								dropdown.setValue(
 									automation.sourceListId || '',
 								);
@@ -269,9 +269,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 									'',
 									'-- Target List (Done) --',
 								);
-								lists.forEach((list) =>
-									dropdown.addOption(list.id, list.name),
-								);
+								lists.forEach((list) => {
+									dropdown.addOption(list.id, list.name);
+								});
 								dropdown.setValue(
 									automation.targetListId || '',
 								);
@@ -367,7 +367,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 					ruleSetting.addDropdown((drop) => {
 						drop.addOption('', '-- Select Tag --');
-						allObsidianTags.forEach((t) => drop.addOption(t, t));
+						allObsidianTags.forEach((t) => {
+							drop.addOption(t, t);
+						});
 						drop.setValue(rule.tag);
 						drop.onChange((val) => {
 							rule.tag = val;
@@ -377,7 +379,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 
 					ruleSetting.addDropdown((drop) => {
 						drop.addOption('', '-- Board --');
-						boards.forEach((b) => drop.addOption(b.id, b.name));
+						boards.forEach((b) => {
+							drop.addOption(b.id, b.name);
+						});
 						drop.setValue(rule.boardId);
 						drop.onChange((val) => {
 							rule.boardId = val;
@@ -393,7 +397,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 						: [];
 					ruleSetting.addDropdown((drop) => {
 						drop.addOption('', '-- List --');
-						lists.forEach((l) => drop.addOption(l.id, l.name));
+						lists.forEach((l) => {
+							drop.addOption(l.id, l.name);
+						});
 						drop.setValue(rule.listId);
 						drop.onChange((val) => {
 							rule.listId = val;
@@ -471,9 +477,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					.setName('Target Trello Board')
 					.addDropdown((dropdown) => {
 						dropdown.addOption('', '-- Select Board --');
-						boards.forEach((board) =>
-							dropdown.addOption(board.id, board.name),
-						);
+						boards.forEach((board) => {
+							dropdown.addOption(board.id, board.name);
+						});
 						dropdown.setValue(selectedBoardId);
 						dropdown.onChange((value) => {
 							this.plugin.settings.folderToTrelloBoardId = value;
@@ -492,9 +498,9 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								.setName('Target Trello List (Column)')
 								.addDropdown((dropdown) => {
 									dropdown.addOption('', '-- Select List --');
-									lists.forEach((list) =>
-										dropdown.addOption(list.id, list.name),
-									);
+									lists.forEach((list) => {
+										dropdown.addOption(list.id, list.name);
+									});
 									dropdown.setValue(
 										this.plugin.settings
 											.folderToTrelloListId,

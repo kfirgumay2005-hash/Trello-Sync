@@ -765,7 +765,13 @@ export default class TrelloSyncPlugin extends Plugin {
 
 			let targetFile: TFile;
 			if (existingFile) {
-				await this.app.vault.modify(existingFile, fullMarkdownContent);
+				// אופטימיזציה ל-SSD: כותב לקובץ רק אם התוכן השתנה בפועל
+				if (existingContent !== fullMarkdownContent) {
+					await this.app.vault.modify(
+						existingFile,
+						fullMarkdownContent,
+					);
+				}
 				targetFile = existingFile;
 			} else {
 				const fileName = `Trello - ${boardName}.md`;
@@ -1087,7 +1093,9 @@ class CreateTrelloCardModal extends Modal {
 
 		new Setting(contentEl).setName('Board').addDropdown((drop) => {
 			drop.addOption('', '-- Select Board --');
-			this.boards.forEach((b) => drop.addOption(b.id, b.name));
+			this.boards.forEach((b) => {
+				drop.addOption(b.id, b.name);
+			});
 			drop.onChange((val) => {
 				void (async () => {
 					this.selectedBoardId = val;
@@ -1184,7 +1192,9 @@ class CreateTrelloCardModal extends Modal {
 		this.listDropdownEl.empty();
 		new Setting(this.listDropdownEl).setName('List').addDropdown((drop) => {
 			drop.addOption('', '-- Select List --');
-			this.lists.forEach((l) => drop.addOption(l.id, l.name));
+			this.lists.forEach((l) => {
+				drop.addOption(l.id, l.name);
+			});
 			drop.setValue(this.selectedListId);
 			drop.onChange((val) => (this.selectedListId = val));
 		});
