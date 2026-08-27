@@ -1129,9 +1129,7 @@ export default class TrelloSyncPlugin extends Plugin {
 											trelloItem.id,
 											obsStateStr,
 										);
-										trelloItem.state = obsStateStr as
-											| 'complete'
-											| 'incomplete';
+										trelloItem.state = obsStateStr;
 										this.lastKnownChecklistState.set(
 											itemKey,
 											obsItem.checked,
