@@ -18,6 +18,8 @@ Set the auto-sync interval.
 
 ## Features!
 
+0. Bidirectional sync of Trello notes , with option to sync description , members , checklists and lists.
+
 1. Create new card: Press the button "Create Trello Card" with the + icon on the sidebar menu, or simply Add a checkbox to a list in the note you provided to add a new card to the board . Don't remove the Id near each card.
    Currently support Card name , Label/Tag , Start and Due Dates
    (Highly recommend to add Dates and Tags from Trello or the sidebar menu rather than manually when creating a card)

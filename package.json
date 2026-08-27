@@ -1,6 +1,6 @@
 {
 	"name": "Trello-Sync",
-	"version": "1.4.2",
+	"version": "1.5.0",
 	"description": "Live sync between Obsidian and Trello",
 	"main": "main.js",
 	"type": "module",

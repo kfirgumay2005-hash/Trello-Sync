@@ -7,6 +7,9 @@ import {
 	Modal,
 	App,
 	Setting,
+	TextAreaComponent,
+	ItemView,
+	WorkspaceLeaf,
 } from 'obsidian';
 import {
 	BoardMapping,
@@ -32,6 +35,24 @@ export interface TrelloLabel {
 	color: string | null;
 }
 
+export interface TrelloMember {
+	id: string;
+	fullName: string;
+	username: string;
+}
+
+export interface TrelloCheckItem {
+	id: string;
+	name: string;
+	state: 'complete' | 'incomplete';
+}
+
+export interface TrelloChecklist {
+	id: string;
+	name: string;
+	checkItems: TrelloCheckItem[];
+}
+
 export interface TrelloCard {
 	id: string;
 	name: string;
@@ -43,7 +64,34 @@ export interface TrelloCard {
 	due?: string;
 	labels?: TrelloLabel[];
 	idLabels?: string[];
+	members?: TrelloMember[];
+	checklists?: TrelloChecklist[];
 }
+
+interface ObsParsedCard {
+	id?: string;
+	listId: string;
+	isChecked: boolean;
+	name: string;
+	startDate: string;
+	dueDate: string;
+	tags: string[];
+	members: string[];
+	desc: string;
+	checkItems: { name: string; checked: boolean }[];
+}
+
+interface ObsParsedList {
+	id?: string;
+	name: string;
+}
+
+interface ParsedObsidian {
+	cards: ObsParsedCard[];
+	lists: ObsParsedList[];
+}
+
+export const TRELLO_KANBAN_VIEW_TYPE = 'trello-kanban-view';
 
 export default class TrelloSyncPlugin extends Plugin {
 	settings!: TrelloPluginSettings;
@@ -53,10 +101,22 @@ export default class TrelloSyncPlugin extends Plugin {
 	lastKnownCardDates: Map<string, { start: string; due: string }> = new Map();
 	lastKnownCardLabels: Map<string, string[]> = new Map();
 
+	lastKnownCardDesc: Map<string, string> = new Map();
+	lastKnownCardMembers: Map<string, string[]> = new Map();
+	lastKnownChecklistState: Map<string, boolean> = new Map();
+
+	lastKnownCardName: Map<string, string> = new Map();
+	lastKnownCardList: Map<string, string> = new Map();
+	lastKnownListName: Map<string, string> = new Map();
+
 	async onload() {
 		await this.loadSettings();
 
-		// Create Card Ribbon Button
+		this.registerView(
+			TRELLO_KANBAN_VIEW_TYPE,
+			(leaf) => new TrelloKanbanView(leaf, this),
+		);
+
 		this.addRibbonIcon('plus-circle', 'Create Trello Card', () => {
 			new CreateTrelloCardModal(this.app, this).open();
 		});
@@ -69,9 +129,37 @@ export default class TrelloSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: 'open-trello-kanban-view',
+			name: 'Open Trello Kanban Board',
+			callback: () => {
+				this.activateKanbanView();
+			},
+		});
+
 		this.addSettingTab(new TrelloSyncSettingTab(this.app, this));
 
 		this.setupSyncInterval();
+	}
+
+	async activateKanbanView() {
+		const { workspace } = this.app;
+		let leaf: WorkspaceLeaf;
+
+		const leaves = workspace.getLeavesOfType(TRELLO_KANBAN_VIEW_TYPE);
+		if (leaves.length > 0) {
+			leaf = leaves[0] as WorkspaceLeaf;
+		} else {
+			leaf = workspace.getLeaf(true);
+			await leaf.setViewState({
+				type: TRELLO_KANBAN_VIEW_TYPE,
+				active: true,
+			});
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
 	}
 
 	onunload() {
@@ -113,6 +201,17 @@ export default class TrelloSyncPlugin extends Plugin {
 		);
 	}
 
+	async getBoardMembers(boardId: string): Promise<TrelloMember[]> {
+		const { apiKey, apiToken } = this.settings;
+		const url = `https://api.trello.com/1/boards/${boardId}/members?key=${apiKey}&token=${apiToken}`;
+		const response = await requestUrl({
+			url: url,
+			method: 'GET',
+			headers: { Accept: 'application/json' },
+		});
+		return response.json as TrelloMember[];
+	}
+
 	async getBoardLists(boardId: string): Promise<TrelloList[]> {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/boards/${boardId}/lists?key=${apiKey}&token=${apiToken}&fields=name,id`;
@@ -122,6 +221,20 @@ export default class TrelloSyncPlugin extends Plugin {
 			headers: { Accept: 'application/json' },
 		});
 		return response.json as TrelloList[];
+	}
+
+	async updateTrelloList(listId: string, name: string) {
+		const { apiKey, apiToken } = this.settings;
+		const url = `https://api.trello.com/1/lists/${listId}?key=${apiKey}&token=${apiToken}`;
+		await requestUrl({
+			url: url,
+			method: 'PUT',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/json',
+			},
+			body: JSON.stringify({ name }),
+		});
 	}
 
 	async getBoardLabels(boardId: string): Promise<TrelloLabel[]> {
@@ -173,7 +286,7 @@ export default class TrelloSyncPlugin extends Plugin {
 
 	async getBoardCards(boardId: string): Promise<TrelloCard[]> {
 		const { apiKey, apiToken } = this.settings;
-		const url = `https://api.trello.com/1/boards/${boardId}/cards?key=${apiKey}&token=${apiToken}&fields=name,idList,desc,closed,dueComplete,start,due,labels,idLabels`;
+		const url = `https://api.trello.com/1/boards/${boardId}/cards?key=${apiKey}&token=${apiToken}&fields=name,idList,desc,closed,dueComplete,start,due,labels,idLabels&members=true&checklists=all`;
 		const response = await requestUrl({
 			url: url,
 			method: 'GET',
@@ -187,17 +300,24 @@ export default class TrelloSyncPlugin extends Plugin {
 		listId: string,
 		start?: string,
 		due?: string,
+		desc?: string,
 	): Promise<TrelloCard> {
 		const { apiKey, apiToken } = this.settings;
 		let url = `https://api.trello.com/1/cards?key=${apiKey}&token=${apiToken}&idList=${listId}&name=${encodeURIComponent(name)}`;
-
 		if (start) url += `&start=${start}`;
 		if (due) url += `&due=${due}`;
+
+		const body: any = {};
+		if (desc) body.desc = desc;
 
 		const response = await requestUrl({
 			url: url,
 			method: 'POST',
-			headers: { Accept: 'application/json' },
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/json',
+			},
+			body: JSON.stringify(body),
 		});
 		return response.json as TrelloCard;
 	}
@@ -230,22 +350,89 @@ export default class TrelloSyncPlugin extends Plugin {
 			start?: string;
 			due?: string;
 			idLabels?: string[];
+			desc?: string;
+			idMembers?: string[];
+			name?: string;
 		},
 	) {
 		const { apiKey, apiToken } = this.settings;
-		let url = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}`;
+		const url = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}`;
 
-		if (props.isComplete !== undefined)
-			url += `&dueComplete=${props.isComplete}`;
-		if (props.targetListId) url += `&idList=${props.targetListId}`;
-		if (props.start !== undefined) url += `&start=${props.start || 'null'}`;
-		if (props.due !== undefined) url += `&due=${props.due || 'null'}`;
+		const body: any = {};
+		if (props.isComplete !== undefined) body.dueComplete = props.isComplete;
+		if (props.targetListId) body.idList = props.targetListId;
+		if (props.start !== undefined) body.start = props.start || null;
+		if (props.due !== undefined) body.due = props.due || null;
 		if (props.idLabels !== undefined)
-			url += `&idLabels=${props.idLabels.join(',')}`;
+			body.idLabels = props.idLabels.join(',');
+		if (props.desc !== undefined) body.desc = props.desc;
+		if (props.idMembers !== undefined)
+			body.idMembers = props.idMembers.join(',');
+		if (props.name !== undefined) body.name = props.name;
 
 		await requestUrl({
 			url: url,
 			method: 'PUT',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/json',
+			},
+			body: JSON.stringify(body),
+		});
+	}
+
+	async createChecklist(
+		cardId: string,
+		name: string,
+	): Promise<TrelloChecklist> {
+		const { apiKey, apiToken } = this.settings;
+		const url = `https://api.trello.com/1/checklists?key=${apiKey}&token=${apiToken}&idCard=${cardId}&name=${encodeURIComponent(name)}`;
+		const response = await requestUrl({
+			url: url,
+			method: 'POST',
+			headers: { Accept: 'application/json' },
+		});
+		return response.json as TrelloChecklist;
+	}
+
+	async createChecklistItem(
+		checklistId: string,
+		name: string,
+	): Promise<TrelloCheckItem> {
+		const { apiKey, apiToken } = this.settings;
+		const url = `https://api.trello.com/1/checklists/${checklistId}/checkItems?key=${apiKey}&token=${apiToken}&name=${encodeURIComponent(name)}`;
+		const response = await requestUrl({
+			url: url,
+			method: 'POST',
+			headers: { Accept: 'application/json' },
+		});
+		return response.json as TrelloCheckItem;
+	}
+
+	async updateChecklistItemState(
+		cardId: string,
+		idCheckItem: string,
+		state: 'complete' | 'incomplete',
+	) {
+		const { apiKey, apiToken } = this.settings;
+		const url = `https://api.trello.com/1/cards/${cardId}/checkItem/${idCheckItem}?key=${apiKey}&token=${apiToken}`;
+		await requestUrl({
+			url: url,
+			method: 'PUT',
+			headers: {
+				'Content-Type': 'application/json',
+				Accept: 'application/json',
+			},
+			body: JSON.stringify({ state }),
+		});
+	}
+
+	async deleteChecklistItem(cardId: string, idCheckItem: string) {
+		const { apiKey, apiToken } = this.settings;
+		const url = `https://api.trello.com/1/cards/${cardId}/checkItem/${idCheckItem}?key=${apiKey}&token=${apiToken}`;
+		await requestUrl({
+			url: url,
+			method: 'DELETE',
 			headers: { Accept: 'application/json' },
 		});
 	}
@@ -256,6 +443,132 @@ export default class TrelloSyncPlugin extends Plugin {
 			if (file instanceof TFile) return file;
 		}
 		return null;
+	}
+
+	parseObsidianContent(
+		content: string,
+		lists: TrelloList[],
+		defaultListId: string,
+	): ParsedObsidian {
+		const parsedCards: ObsParsedCard[] = [];
+		const parsedLists: ObsParsedList[] = [];
+		let currentListId = defaultListId;
+		let currentCard: ObsParsedCard | null = null;
+		const lines = content.split('\n');
+
+		for (const line of lines) {
+			const headerMatch = line.match(
+				/^##\s+(.*?)(?:\s+<!-- listId:([a-zA-Z0-9]+) -->)?$/,
+			);
+
+			if (headerMatch) {
+				const sectionTitle = (headerMatch[1] || '').trim();
+				const listIdMatch = headerMatch[2];
+
+				let matchedList: TrelloList | undefined;
+
+				if (listIdMatch) {
+					matchedList = lists.find((l) => l.id === listIdMatch);
+				}
+
+				if (!matchedList) {
+					matchedList = lists.find(
+						(l) =>
+							l.name.trim().toLowerCase() ===
+							sectionTitle.toLowerCase(),
+					);
+				}
+
+				if (matchedList) {
+					currentListId = matchedList.id;
+					parsedLists.push({
+						id: matchedList.id,
+						name: sectionTitle,
+					});
+				} else {
+					currentListId = defaultListId;
+				}
+				currentCard = null;
+				continue;
+			}
+
+			const cardMatch = line.match(
+				/^- \[(x|X| )\] (.*?)(?: <!-- id:([a-zA-Z0-9]+) -->)?$/,
+			);
+			if (cardMatch) {
+				const isChecked = (cardMatch[1] || '').toLowerCase() === 'x';
+				let rawStr = cardMatch[2] || '';
+				const id = cardMatch[3];
+
+				let startDate = '',
+					dueDate = '';
+				const startM = rawStr.match(/🛫 (\d{4}-\d{2}-\d{2})/);
+				if (startM && startM[1]) {
+					startDate = startM[1];
+					rawStr = rawStr.replace(startM[0] || '', '');
+				}
+				const dueM = rawStr.match(/📅 (\d{4}-\d{2}-\d{2})/);
+				if (dueM && dueM[1]) {
+					dueDate = dueM[1];
+					rawStr = rawStr.replace(dueM[0] || '', '');
+				}
+
+				const tags: string[] = [];
+				const tagRegex = /#([^\s#]+)/g;
+				let tagMatch;
+				while ((tagMatch = tagRegex.exec(rawStr)) !== null) {
+					if (tagMatch[1]) tags.push(tagMatch[1].toLowerCase());
+				}
+				rawStr = rawStr.replace(tagRegex, '');
+
+				const members: string[] = [];
+				const membersRegex = /👤\((.*?)\)/;
+				const membersM = rawStr.match(membersRegex);
+				if (membersM && membersM[1]) {
+					membersM[1]
+						.split(',')
+						.forEach((m) =>
+							members.push(m.trim().replace('@', '')),
+						);
+					rawStr = rawStr.replace(membersM[0] || '', '');
+				}
+
+				rawStr = rawStr.replace(/\s+/g, ' ').trim();
+
+				currentCard = {
+					id,
+					listId: currentListId,
+					isChecked,
+					name: rawStr,
+					startDate,
+					dueDate,
+					tags,
+					members,
+					desc: '',
+					checkItems: [],
+				};
+				parsedCards.push(currentCard);
+				continue;
+			}
+
+			if (currentCard) {
+				if (line.startsWith('  > ')) {
+					currentCard.desc +=
+						(currentCard.desc ? '\n' : '') + line.substring(4);
+				} else if (line.match(/^  - \[(x|X| )\] /)) {
+					const cm = line.match(/^  - \[(x|X| )\] (.*)/);
+					if (cm && cm[2]) {
+						currentCard.checkItems.push({
+							checked: (cm[1] || '').toLowerCase() === 'x',
+							name: cm[2].trim(),
+						});
+					}
+				} else if (line.trim() !== '') {
+					currentCard = null;
+				}
+			}
+		}
+		return { cards: parsedCards, lists: parsedLists };
 	}
 
 	async syncAllBoards(isBackground = false) {
@@ -294,7 +607,10 @@ export default class TrelloSyncPlugin extends Plugin {
 			const boardName = currentBoard ? currentBoard.name : 'Trello Board';
 
 			const boardLabels = await this.getBoardLabels(boardId);
-			const existingFile = this.getTargetFile(mapping.targetNotePath);
+			const boardMembers = await this.getBoardMembers(boardId);
+			const memberMap = new Map<string, string>();
+			for (const m of boardMembers)
+				memberMap.set(m.username.toLowerCase(), m.id);
 
 			const lists = await this.getBoardLists(boardId);
 			let cards = await this.getBoardCards(boardId);
@@ -303,20 +619,86 @@ export default class TrelloSyncPlugin extends Plugin {
 			let existingContent = '';
 			let extraUserContent = '';
 
+			const existingFile = this.getTargetFile(mapping.targetNotePath);
 			let knownCardIds =
 				this.knownCardIdsByMapping.get(mappingKey) || new Set<string>();
 
 			if (existingFile) {
 				existingContent = await this.app.vault.read(existingFile);
-				const presentCardIds = new Set<string>();
-				const idExtractRegex = /<!-- id:([a-zA-Z0-9]+) -->/g;
-				let idMatch: RegExpExecArray | null;
 
-				while (
-					(idMatch = idExtractRegex.exec(existingContent)) !== null
-				) {
-					if (idMatch[1]) presentCardIds.add(idMatch[1]);
+				const endMarker = '<!-- END TRELLO SYNC -->';
+				if (existingContent.includes(endMarker)) {
+					extraUserContent = (
+						existingContent.split(endMarker)[1] || ''
+					).replace(/^[\r\n]+/, '');
+					existingContent = existingContent.split(endMarker)[0] || '';
 				}
+
+				const parsedData = this.parseObsidianContent(
+					existingContent,
+					lists,
+					defaultFallbackListId,
+				);
+				const parsedCards = parsedData.cards;
+
+				// --- SYNC LIST NAMES (Two-Way) ---
+				if (this.settings.syncListNames) {
+					for (const obsList of parsedData.lists) {
+						if (obsList.id) {
+							const tList = lists.find(
+								(l) => l.id === obsList.id,
+							);
+							if (tList) {
+								const statusKey = `${mappingKey}::list::${obsList.id}`;
+								const trelloName = tList.name;
+								const wasName =
+									this.lastKnownListName.get(statusKey) ??
+									trelloName;
+
+								if (obsList.name !== trelloName) {
+									if (
+										obsList.name !== wasName &&
+										trelloName === wasName
+									) {
+										// Changed in Obsidian -> Update Trello
+										try {
+											await this.updateTrelloList(
+												obsList.id,
+												obsList.name,
+											);
+											tList.name = obsList.name;
+											this.lastKnownListName.set(
+												statusKey,
+												obsList.name,
+											);
+										} catch (e) {
+											console.error(
+												'Failed to rename Trello list',
+												e,
+											);
+										}
+									} else {
+										// Changed in Trello -> Trello wins
+										this.lastKnownListName.set(
+											statusKey,
+											trelloName,
+										);
+									}
+								} else {
+									this.lastKnownListName.set(
+										statusKey,
+										trelloName,
+									);
+								}
+							}
+						}
+					}
+				}
+
+				const presentCardIds = new Set<string>();
+				parsedCards.forEach((c) => {
+					if (c.id) presentCardIds.add(c.id);
+				});
 
 				if (knownCardIds.size > 0) {
 					for (const knownId of knownCardIds) {
@@ -335,344 +717,504 @@ export default class TrelloSyncPlugin extends Plugin {
 						}
 					}
 				}
-
 				knownCardIds = presentCardIds;
 
-				const lines = existingContent.split('\n');
-				let currentListId = defaultFallbackListId;
+				for (const obsCard of parsedCards) {
+					const obsCardId = obsCard.id;
 
-				for (const line of lines) {
-					const headerMatch = line.match(/^##\s+(.*)$/);
-					if (headerMatch && headerMatch[1]) {
-						const sectionTitle = headerMatch[1]
-							.trim()
-							.toLowerCase();
-						const matchedList = lists.find(
-							(l) => l.name.trim().toLowerCase() === sectionTitle,
-						);
-						if (matchedList) currentListId = matchedList.id;
-					}
-
-					const newCardMatch = line.match(
-						/^- \[(x|X| )\] (.*?)(?: <!-- id:.*-->)?$/,
-					);
-					if (newCardMatch && !line.includes('<!-- id:')) {
-						let rawCardName = newCardMatch[2] || '';
-						let obsStart = '';
-						let obsDue = '';
-
-						const startM = rawCardName.match(
-							/🛫 (\d{4}-\d{2}-\d{2})/,
-						);
-						if (startM && startM[1]) {
-							obsStart = startM[1];
-							rawCardName = rawCardName.replace(startM[0], '');
-						}
-						const dueM = rawCardName.match(
-							/📅 (\d{4}-\d{2}-\d{2})/,
-						);
-						if (dueM && dueM[1]) {
-							obsDue = dueM[1];
-							rawCardName = rawCardName.replace(dueM[0], '');
-						}
-
-						// זיהוי תגיות (תומך בעברית, ללא רווחים)
-						const obsTags: string[] = [];
-						const tagRegex = /#([^\s#]+)/g;
-						let tagMatch;
-						while (
-							(tagMatch = tagRegex.exec(rawCardName)) !== null
-						) {
-							if (tagMatch && tagMatch[1]) {
-								obsTags.push(tagMatch[1].toLowerCase());
-							}
-						}
-						rawCardName = rawCardName
-							.replace(tagRegex, '')
-							.replace(/\s+/g, ' ')
-							.trim();
-
-						const cardName = rawCardName;
-						const isCheckedInObsidian =
-							newCardMatch[1]?.toLowerCase() === 'x';
-
-						if (cardName && currentListId) {
-							try {
-								const newCard = await this.createTrelloCard(
-									cardName,
-									currentListId,
-									obsStart,
-									obsDue,
-								);
-
-								if (obsTags.length > 0) {
-									await this.syncCardLabels(
-										boardId,
-										newCard.id,
-										obsTags,
-										boardLabels,
-									);
-								}
-
-								if (isCheckedInObsidian) {
-									let targetListForNewCard = undefined;
-									if (
-										mapping.enableMoveOnCheck &&
-										mapping.automations
-									) {
-										const rule = mapping.automations.find(
-											(a) =>
-												a.sourceListId ===
-												currentListId,
-										);
-										if (rule)
-											targetListForNewCard =
-												rule.targetListId;
-									}
-
-									await this.updateTrelloCard(newCard.id, {
-										isComplete: true,
-										targetListId: targetListForNewCard,
-									});
-
-									newCard.dueComplete = true;
-									if (targetListForNewCard)
-										newCard.idList = targetListForNewCard;
-								}
-
-								cards.push(newCard);
-								knownCardIds.add(newCard.id);
-								this.lastKnownCardStatus.set(
-									`${mappingKey}::${newCard.id}`,
-									isCheckedInObsidian,
-								);
-								this.lastKnownCardDates.set(
-									`${mappingKey}::${newCard.id}`,
-									{ start: obsStart, due: obsDue },
-								);
-								this.lastKnownCardLabels.set(
-									`${mappingKey}::${newCard.id}`,
-									obsTags,
-								);
-							} catch (err: unknown) {
-								console.error(
-									`Failed to create card "${cardName}" in Trello.`,
-									err,
-								);
-							}
-						}
-					}
-				}
-
-				const lineRegex =
-					/- \[(x|X| )\] (.*?) <!-- id:([a-zA-Z0-9]+) -->/g;
-				let match: RegExpExecArray | null;
-
-				while ((match = lineRegex.exec(existingContent)) !== null) {
-					const isCheckedInObsidian = match[1]?.toLowerCase() === 'x';
-					let rawCardName = match[2] || '';
-					const cardId = match[3];
-
-					if (!cardId) continue;
-					const currentCard = cards.find((c) => c.id === cardId);
-					if (!currentCard) continue;
-
-					let obsStart = '';
-					let obsDue = '';
-					const startM = rawCardName.match(/🛫 (\d{4}-\d{2}-\d{2})/);
-					if (startM && startM[1]) {
-						obsStart = startM[1];
-						rawCardName = rawCardName.replace(startM[0], '');
-					}
-					const dueM = rawCardName.match(/📅 (\d{4}-\d{2}-\d{2})/);
-					if (dueM && dueM[1]) {
-						obsDue = dueM[1];
-						rawCardName = rawCardName.replace(dueM[0], '');
-					}
-
-					const obsTags: string[] = [];
-					const tagRegex = /#([^\s#]+)/g;
-					let tagMatch;
-					while ((tagMatch = tagRegex.exec(rawCardName)) !== null) {
-						if (tagMatch && tagMatch[1]) {
-							obsTags.push(tagMatch[1].toLowerCase());
-						}
-					}
-
-					const isDoneInTrello = !!currentCard.dueComplete;
-					const trelloStart = currentCard.start
-						? currentCard.start.substring(0, 10)
-						: '';
-					const trelloDue = currentCard.due
-						? currentCard.due.substring(0, 10)
-						: '';
-
-					const trelloTags = (currentCard.labels || [])
-						.filter((l) => l.name)
-						.map((l) => l.name.toLowerCase().replace(/\s+/g, '-'));
-
-					const statusKey = `${mappingKey}::${cardId}`;
-					const wasChecked = this.lastKnownCardStatus.get(statusKey);
-					const lastDates = this.lastKnownCardDates.get(
-						statusKey,
-					) || { start: trelloStart, due: trelloDue };
-					const lastTags =
-						this.lastKnownCardLabels.get(statusKey) || trelloTags;
-
-					const updateProps: {
-						isComplete?: boolean;
-						targetListId?: string;
-						start?: string;
-						due?: string;
-						idLabels?: string[];
-					} = {};
-
-					if (obsStart !== lastDates.start)
-						updateProps.start = obsStart;
-					if (obsDue !== lastDates.due) updateProps.due = obsDue;
-
-					const obsidianTagsChanged =
-						JSON.stringify(obsTags.sort()) !==
-						JSON.stringify(lastTags.sort());
-					const trelloTagsChanged =
-						JSON.stringify(trelloTags.sort()) !==
-						JSON.stringify(lastTags.sort());
-
-					if (obsidianTagsChanged && !trelloTagsChanged) {
+					if (!obsCardId) {
 						try {
-							const newLabelIds = await this.syncCardLabels(
-								boardId,
-								cardId,
-								obsTags,
-								boardLabels,
+							const newCard = await this.createTrelloCard(
+								obsCard.name,
+								obsCard.listId,
+								obsCard.startDate,
+								obsCard.dueDate,
+								obsCard.desc,
 							);
-							currentCard.idLabels = newLabelIds;
-							this.lastKnownCardLabels.set(statusKey, obsTags);
-						} catch (err) {
+
+							if (obsCard.tags.length > 0) {
+								await this.syncCardLabels(
+									boardId,
+									newCard.id,
+									obsCard.tags,
+									boardLabels,
+								);
+							}
+
+							const memIds = obsCard.members
+								.map((u) => memberMap.get(u.toLowerCase()))
+								.filter(Boolean) as string[];
+							if (memIds.length > 0) {
+								await this.updateTrelloCard(newCard.id, {
+									idMembers: memIds,
+								});
+								newCard.members = memIds
+									.map((id) =>
+										boardMembers.find((m) => m.id === id),
+									)
+									.filter(Boolean) as TrelloMember[];
+							}
+
+							if (obsCard.checkItems.length > 0) {
+								const cl = await this.createChecklist(
+									newCard.id,
+									'Checklist',
+								);
+								newCard.checklists = [cl];
+								for (const item of obsCard.checkItems) {
+									const ti = await this.createChecklistItem(
+										cl.id,
+										item.name,
+									);
+									if (item.checked) {
+										await this.updateChecklistItemState(
+											newCard.id,
+											ti.id,
+											'complete',
+										);
+										ti.state = 'complete';
+									}
+									cl.checkItems.push(ti);
+								}
+							}
+
+							if (obsCard.isChecked) {
+								let targetList: string | undefined = undefined;
+								const automations = mapping.automations;
+								if (mapping.enableMoveOnCheck && automations) {
+									const rule = automations.find(
+										(a) =>
+											a.sourceListId === obsCard.listId,
+									);
+									if (rule) targetList = rule.targetListId;
+								}
+								await this.updateTrelloCard(newCard.id, {
+									isComplete: true,
+									targetListId: targetList,
+								});
+								newCard.dueComplete = true;
+								if (targetList) newCard.idList = targetList;
+							}
+
+							cards.push(newCard);
+							knownCardIds.add(newCard.id);
+						} catch (err: unknown) {
 							console.error(
-								`Failed to update labels for card ${cardId}`,
+								`Failed to create card "${obsCard.name}" in Trello.`,
 								err,
 							);
 						}
-					} else if (trelloTagsChanged) {
-						this.lastKnownCardLabels.set(statusKey, trelloTags);
 					} else {
-						this.lastKnownCardLabels.set(statusKey, trelloTags);
-					}
+						const currentCard = cards.find(
+							(c) => c.id === obsCardId,
+						);
+						if (!currentCard) continue;
 
-					if (isCheckedInObsidian !== isDoneInTrello) {
-						if (wasChecked !== undefined) {
-							const obsidianChanged =
-								isCheckedInObsidian !== wasChecked;
-							const trelloChanged = isDoneInTrello !== wasChecked;
+						const statusKey = `${mappingKey}::${obsCardId}`;
+						const updateProps: {
+							isComplete?: boolean;
+							targetListId?: string;
+							start?: string;
+							due?: string;
+							idLabels?: string[];
+							desc?: string;
+							idMembers?: string[];
+							name?: string;
+						} = {};
 
-							if (obsidianChanged && !trelloChanged) {
-								updateProps.isComplete = isCheckedInObsidian;
+						const trelloName = currentCard.name || '';
+						const wasName =
+							this.lastKnownCardName.get(statusKey) ?? trelloName;
+						if (obsCard.name !== trelloName) {
+							if (
+								obsCard.name !== wasName &&
+								trelloName === wasName
+							) {
+								updateProps.name = obsCard.name;
+								this.lastKnownCardName.set(
+									statusKey,
+									obsCard.name,
+								);
+							} else {
+								this.lastKnownCardName.set(
+									statusKey,
+									trelloName,
+								);
+							}
+						} else {
+							this.lastKnownCardName.set(statusKey, trelloName);
+						}
+
+						const trelloListId = currentCard.idList;
+						const wasListId =
+							this.lastKnownCardList.get(statusKey) ??
+							trelloListId;
+						if (obsCard.listId !== trelloListId) {
+							if (
+								obsCard.listId !== wasListId &&
+								trelloListId === wasListId
+							) {
+								updateProps.targetListId = obsCard.listId;
+								this.lastKnownCardList.set(
+									statusKey,
+									obsCard.listId,
+								);
+							} else {
+								this.lastKnownCardList.set(
+									statusKey,
+									trelloListId,
+								);
+							}
+						} else {
+							this.lastKnownCardList.set(statusKey, trelloListId);
+						}
+
+						const trelloStart = currentCard.start
+							? currentCard.start.substring(0, 10)
+							: '';
+						const trelloDue = currentCard.due
+							? currentCard.due.substring(0, 10)
+							: '';
+						const lastDates = this.lastKnownCardDates.get(
+							statusKey,
+						) || { start: trelloStart, due: trelloDue };
+
+						if (obsCard.startDate !== lastDates.start)
+							updateProps.start = obsCard.startDate;
+						if (obsCard.dueDate !== lastDates.due)
+							updateProps.due = obsCard.dueDate;
+
+						const trelloTags = (currentCard.labels || [])
+							.filter((l) => l.name)
+							.map((l) =>
+								(l.name || '')
+									.toLowerCase()
+									.replace(/\s+/g, '-'),
+							);
+						const lastTags =
+							this.lastKnownCardLabels.get(statusKey) ||
+							trelloTags;
+						const obsidianTagsChanged =
+							JSON.stringify(obsCard.tags.sort()) !==
+							JSON.stringify(lastTags.sort());
+
+						if (obsidianTagsChanged) {
+							try {
+								currentCard.idLabels =
+									await this.syncCardLabels(
+										boardId,
+										obsCardId,
+										obsCard.tags,
+										boardLabels,
+									);
+								this.lastKnownCardLabels.set(
+									statusKey,
+									obsCard.tags,
+								);
+							} catch (e) {}
+						} else {
+							this.lastKnownCardLabels.set(statusKey, trelloTags);
+						}
+
+						const isDoneInTrello = !!currentCard.dueComplete;
+						const wasChecked =
+							this.lastKnownCardStatus.get(statusKey);
+
+						if (obsCard.isChecked !== isDoneInTrello) {
+							if (
+								wasChecked !== undefined &&
+								obsCard.isChecked !== wasChecked &&
+								isDoneInTrello === wasChecked
+							) {
+								updateProps.isComplete = obsCard.isChecked;
+								const localAutomations = mapping.automations;
 								if (
 									mapping.enableMoveOnCheck &&
-									mapping.automations
+									localAutomations
 								) {
-									if (isCheckedInObsidian) {
-										const rule = mapping.automations.find(
-											(a) =>
-												a.sourceListId ===
+									const rule = localAutomations.find((a) =>
+										obsCard.isChecked
+											? a.sourceListId ===
+												currentCard.idList
+											: a.targetListId ===
 												currentCard.idList,
-										);
-										if (rule)
-											updateProps.targetListId =
-												rule.targetListId;
-									} else {
-										const rule = mapping.automations.find(
-											(a) =>
-												a.targetListId ===
-												currentCard.idList,
-										);
-										if (rule)
-											updateProps.targetListId =
-												rule.sourceListId;
-									}
+									);
+									if (rule)
+										updateProps.targetListId =
+											obsCard.isChecked
+												? rule.targetListId
+												: rule.sourceListId;
 								}
-							} else if (trelloChanged) {
+							} else {
 								this.lastKnownCardStatus.set(
 									statusKey,
 									isDoneInTrello,
 								);
 							}
-						} else {
-							this.lastKnownCardStatus.set(
-								statusKey,
-								isDoneInTrello,
-							);
 						}
-					} else {
-						this.lastKnownCardStatus.set(statusKey, isDoneInTrello);
-					}
 
-					if (Object.keys(updateProps).length > 0) {
-						try {
-							await this.updateTrelloCard(cardId, updateProps);
-
-							if (updateProps.isComplete !== undefined) {
-								currentCard.dueComplete =
-									updateProps.isComplete;
-								this.lastKnownCardStatus.set(
+						const trelloDesc = currentCard.desc || '';
+						const wasDesc =
+							this.lastKnownCardDesc.get(statusKey) ?? trelloDesc;
+						if (obsCard.desc !== trelloDesc) {
+							if (
+								obsCard.desc !== wasDesc &&
+								trelloDesc === wasDesc
+							) {
+								updateProps.desc = obsCard.desc;
+								this.lastKnownCardDesc.set(
 									statusKey,
-									updateProps.isComplete,
+									obsCard.desc,
+								);
+							} else {
+								this.lastKnownCardDesc.set(
+									statusKey,
+									trelloDesc,
 								);
 							}
-							if (updateProps.targetListId) {
-								currentCard.idList = updateProps.targetListId;
-							}
-							if (updateProps.start !== undefined) {
-								currentCard.start = updateProps.start
-									? `${updateProps.start}T00:00:00.000Z`
-									: undefined;
-								lastDates.start = updateProps.start;
-							}
-							if (updateProps.due !== undefined) {
-								currentCard.due = updateProps.due
-									? `${updateProps.due}T00:00:00.000Z`
-									: undefined;
-								lastDates.due = updateProps.due;
-							}
+						} else {
+							this.lastKnownCardDesc.set(statusKey, trelloDesc);
+						}
 
-							this.lastKnownCardDates.set(statusKey, lastDates);
-						} catch (err: unknown) {
-							console.error(
-								`Failed to update Trello card ${cardId}`,
-								err,
+						const obsMembersIds = obsCard.members
+							.map((u) => memberMap.get(u.toLowerCase()))
+							.filter(Boolean) as string[];
+						const trelloMembersIds = (
+							currentCard.members || []
+						).map((m) => m.id);
+						const wasMembersIds =
+							this.lastKnownCardMembers.get(statusKey) ??
+							trelloMembersIds;
+
+						if (
+							obsMembersIds.sort().join(',') !==
+							trelloMembersIds.sort().join(',')
+						) {
+							if (
+								obsMembersIds.sort().join(',') !==
+									wasMembersIds.sort().join(',') &&
+								trelloMembersIds.sort().join(',') ===
+									wasMembersIds.sort().join(',')
+							) {
+								updateProps.idMembers = obsMembersIds;
+								this.lastKnownCardMembers.set(
+									statusKey,
+									obsMembersIds,
+								);
+							} else {
+								this.lastKnownCardMembers.set(
+									statusKey,
+									trelloMembersIds,
+								);
+							}
+						} else {
+							this.lastKnownCardMembers.set(
+								statusKey,
+								trelloMembersIds,
 							);
 						}
-					} else {
-						this.lastKnownCardDates.set(statusKey, {
-							start: trelloStart,
-							due: trelloDue,
-						});
-					}
-				}
 
-				const endMarker = '<!-- END TRELLO SYNC -->';
-				if (existingContent.includes(endMarker)) {
-					extraUserContent = (
-						existingContent.split(endMarker)[1] || ''
-					).replace(/^[\r\n]+/, '');
-				} else if (existingContent.trim()) {
-					extraUserContent = existingContent.replace(/^[\r\n]+/, '');
+						if (Object.keys(updateProps).length > 0) {
+							try {
+								await this.updateTrelloCard(
+									obsCardId,
+									updateProps,
+								);
+
+								if (updateProps.isComplete !== undefined) {
+									currentCard.dueComplete =
+										updateProps.isComplete;
+									this.lastKnownCardStatus.set(
+										statusKey,
+										updateProps.isComplete,
+									);
+								}
+								if (updateProps.targetListId) {
+									currentCard.idList =
+										updateProps.targetListId;
+								}
+								if (updateProps.start !== undefined) {
+									currentCard.start = updateProps.start
+										? `${updateProps.start}T00:00:00.000Z`
+										: undefined;
+									lastDates.start = updateProps.start || '';
+								}
+								if (updateProps.due !== undefined) {
+									currentCard.due = updateProps.due
+										? `${updateProps.due}T00:00:00.000Z`
+										: undefined;
+									lastDates.due = updateProps.due || '';
+								}
+								if (updateProps.desc !== undefined) {
+									currentCard.desc = updateProps.desc;
+								}
+								if (updateProps.idMembers !== undefined) {
+									currentCard.members = updateProps.idMembers
+										.map((id: string) =>
+											boardMembers.find(
+												(m) => m.id === id,
+											),
+										)
+										.filter(Boolean) as TrelloMember[];
+								}
+								if (updateProps.name !== undefined) {
+									currentCard.name = updateProps.name;
+								}
+								this.lastKnownCardDates.set(
+									statusKey,
+									lastDates,
+								);
+							} catch (err: unknown) {}
+						} else {
+							this.lastKnownCardDates.set(statusKey, {
+								start: trelloStart,
+								due: trelloDue,
+							});
+						}
+
+						let trelloChecklist =
+							currentCard.checklists &&
+							currentCard.checklists.length > 0
+								? currentCard.checklists[0]
+								: null;
+
+						const matchedTrelloItemIds = new Set<string>();
+
+						for (const obsItem of obsCard.checkItems) {
+							const itemKey = `${statusKey}::checklist::${obsItem.name}`;
+							let trelloItem =
+								trelloChecklist && trelloChecklist.checkItems
+									? trelloChecklist.checkItems.find(
+											(i) => i.name === obsItem.name,
+										)
+									: null;
+							const obsStateStr = obsItem.checked
+								? 'complete'
+								: 'incomplete';
+
+							if (!trelloItem) {
+								if (!trelloChecklist) {
+									trelloChecklist =
+										await this.createChecklist(
+											obsCardId,
+											'Checklist',
+										);
+									if (!currentCard.checklists)
+										currentCard.checklists = [];
+									currentCard.checklists.push(
+										trelloChecklist,
+									);
+								}
+
+								if (trelloChecklist) {
+									try {
+										trelloItem =
+											await this.createChecklistItem(
+												trelloChecklist.id,
+												obsItem.name,
+											);
+										if (obsItem.checked) {
+											await this.updateChecklistItemState(
+												obsCardId,
+												trelloItem.id,
+												'complete',
+											);
+											trelloItem.state = 'complete';
+										}
+										this.lastKnownChecklistState.set(
+											itemKey,
+											obsItem.checked,
+										);
+										if (!trelloChecklist.checkItems)
+											trelloChecklist.checkItems = [];
+										trelloChecklist.checkItems.push(
+											trelloItem,
+										);
+										matchedTrelloItemIds.add(trelloItem.id);
+									} catch (e) {}
+								}
+							} else {
+								matchedTrelloItemIds.add(trelloItem.id);
+								const trelloStateStr = trelloItem.state;
+								const wasStateStr =
+									this.lastKnownChecklistState.has(itemKey)
+										? this.lastKnownChecklistState.get(
+												itemKey,
+											)
+											? 'complete'
+											: 'incomplete'
+										: trelloStateStr;
+
+								if (obsStateStr !== trelloStateStr) {
+									if (
+										obsStateStr !== wasStateStr &&
+										trelloStateStr === wasStateStr
+									) {
+										await this.updateChecklistItemState(
+											obsCardId,
+											trelloItem.id,
+											obsStateStr,
+										);
+										trelloItem.state = obsStateStr as
+											| 'complete'
+											| 'incomplete';
+										this.lastKnownChecklistState.set(
+											itemKey,
+											obsItem.checked,
+										);
+									} else {
+										this.lastKnownChecklistState.set(
+											itemKey,
+											trelloStateStr === 'complete',
+										);
+									}
+								} else {
+									this.lastKnownChecklistState.set(
+										itemKey,
+										trelloStateStr === 'complete',
+									);
+								}
+							}
+						}
+
+						if (trelloChecklist && trelloChecklist.checkItems) {
+							const itemsToDelete =
+								trelloChecklist.checkItems.filter(
+									(i) => !matchedTrelloItemIds.has(i.id),
+								);
+							for (const tItem of itemsToDelete) {
+								try {
+									await this.deleteChecklistItem(
+										obsCardId,
+										tItem.id,
+									);
+									this.lastKnownChecklistState.delete(
+										`${statusKey}::checklist::${tItem.name}`,
+									);
+								} catch (e) {}
+							}
+							trelloChecklist.checkItems =
+								trelloChecklist.checkItems.filter((i) =>
+									matchedTrelloItemIds.has(i.id),
+								);
+						}
+					}
 				}
 			}
 
-			if (mapping.enableMoveOnCheck && mapping.automations) {
+			const enforceAutomations = mapping.automations;
+			if (mapping.enableMoveOnCheck && enforceAutomations) {
 				for (const card of cards) {
-					let newTargetListId = undefined;
+					let newTargetListId: string | undefined = undefined;
 					const isDone = !!card.dueComplete;
 
 					if (isDone) {
-						const rule = mapping.automations.find(
+						const rule = enforceAutomations.find(
 							(a) => a.sourceListId === card.idList,
 						);
 						if (rule) newTargetListId = rule.targetListId;
 					} else {
-						const rule = mapping.automations.find(
+						const rule = enforceAutomations.find(
 							(a) => a.targetListId === card.idList,
 						);
 						if (rule) newTargetListId = rule.sourceListId;
@@ -685,21 +1227,36 @@ export default class TrelloSyncPlugin extends Plugin {
 								targetListId: newTargetListId,
 							});
 							card.idList = newTargetListId;
-						} catch (err: unknown) {
-							console.error(
-								`Failed to enforce list automation for card ${card.id}`,
-								err,
-							);
-						}
+						} catch (err: unknown) {}
 					}
 				}
 			}
 
 			let trelloSection = `# ${boardName}\n\n`;
-			trelloSection += `*Synced from Trello on ${new Date().toLocaleString()}*\n\n---\n\n`;
+			trelloSection += `*Synced from Trello on ${new Date().toLocaleString()}*\n\n`;
+
+			if (this.settings.showBoardMembers) {
+				try {
+					const boardMembersInfo =
+						await this.getBoardMembers(boardId);
+					if (boardMembersInfo && boardMembersInfo.length > 0) {
+						trelloSection += `**👥Board Members:** ${boardMembersInfo.map((m) => `@${m.username}`).join(', ')}\n\n`;
+					}
+				} catch (err) {}
+			}
+
+			trelloSection += `---\n\n`;
 
 			for (const list of lists) {
-				trelloSection += `## ${list.name}\n\n`;
+				const listIdComment = this.settings.syncListNames
+					? ` <!-- listId:${list.id} -->`
+					: '';
+				trelloSection += `## ${list.name}${listIdComment}\n\n`;
+				this.lastKnownListName.set(
+					`${mappingKey}::list::${list.id}`,
+					list.name,
+				);
+
 				const listCards = cards.filter(
 					(c) => c.idList === list.id && !c.closed,
 				);
@@ -722,35 +1279,75 @@ export default class TrelloSyncPlugin extends Plugin {
 							.filter((l) => l.name)
 							.map(
 								(l) =>
-									`#${l.name.toLowerCase().replace(/\s+/g, '-')}`,
+									`#${(l.name || '').toLowerCase().replace(/\s+/g, '-')}`,
 							);
+						if (tTags.length > 0) tagsStr = ` ${tTags.join(' ')}`;
 
-						if (tTags.length > 0) {
-							tagsStr = ` ${tTags.join(' ')}`;
+						let membersStr = '';
+						if (
+							this.settings.syncCardMembers &&
+							card.members &&
+							card.members.length > 0
+						) {
+							membersStr = ` 👤(${card.members.map((m) => `@${m.username}`).join(', ')})`;
 						}
 
-						trelloSection += `- [${isChecked}] ${card.name}${dateStr}${tagsStr} <!-- id:${card.id} -->\n`;
+						trelloSection += `- [${isChecked}] ${card.name}${dateStr}${tagsStr}${membersStr} <!-- id:${card.id} -->\n`;
 
 						knownCardIds.add(card.id);
+						const statusKey = `${mappingKey}::${card.id}`;
 						this.lastKnownCardStatus.set(
-							`${mappingKey}::${card.id}`,
+							statusKey,
 							!!card.dueComplete,
 						);
-						this.lastKnownCardDates.set(
-							`${mappingKey}::${card.id}`,
-							{ start: tStart, due: tDue },
-						);
+						this.lastKnownCardDates.set(statusKey, {
+							start: tStart,
+							due: tDue,
+						});
 						this.lastKnownCardLabels.set(
-							`${mappingKey}::${card.id}`,
+							statusKey,
 							tTags.map((t) => t.replace('#', '')),
 						);
+						this.lastKnownCardDesc.set(statusKey, card.desc || '');
+						this.lastKnownCardMembers.set(
+							statusKey,
+							(card.members || []).map((m) => m.id),
+						);
+						this.lastKnownCardName.set(statusKey, card.name);
+						this.lastKnownCardList.set(statusKey, card.idList);
 
-						if (card.desc && card.desc.trim() !== '') {
+						if (
+							this.settings.syncCardDescription &&
+							card.desc &&
+							card.desc.trim() !== ''
+						) {
 							const indentedDesc = card.desc
 								.split('\n')
 								.map((line) => `  > ${line}`)
 								.join('\n');
 							trelloSection += `${indentedDesc}\n`;
+						}
+
+						if (
+							this.settings.syncCardChecklists &&
+							card.checklists &&
+							card.checklists.length > 0
+						) {
+							for (const cl of card.checklists) {
+								if (cl.checkItems && cl.checkItems.length > 0) {
+									for (const item of cl.checkItems) {
+										const itemChecked =
+											item.state === 'complete'
+												? 'x'
+												: ' ';
+										trelloSection += `  - [${itemChecked}] ${item.name}\n`;
+										this.lastKnownChecklistState.set(
+											`${statusKey}::checklist::${item.name}`,
+											item.state === 'complete',
+										);
+									}
+								}
+							}
 						}
 					}
 					trelloSection += `\n`;
@@ -765,27 +1362,26 @@ export default class TrelloSyncPlugin extends Plugin {
 
 			let targetFile: TFile;
 			if (existingFile) {
-				// אופטימיזציה ל-SSD: כותב לקובץ רק אם התוכן השתנה בפועל
-				if (existingContent !== fullMarkdownContent) {
+				if (
+					existingContent.trim() !==
+					fullMarkdownContent
+						.replace(`\n\n${extraUserContent}`, '')
+						.trim()
+				) {
 					await this.app.vault.modify(
 						existingFile,
 						fullMarkdownContent,
 					);
 				}
-				targetFile = existingFile;
 			} else {
 				const fileName = `Trello - ${boardName}.md`;
 				const fallback = this.app.vault.getAbstractFileByPath(fileName);
 				if (fallback instanceof TFile) {
 					await this.app.vault.modify(fallback, fullMarkdownContent);
-					targetFile = fallback;
 				} else {
-					targetFile = await this.app.vault.create(
-						fileName,
-						fullMarkdownContent,
-					);
+					await this.app.vault.create(fileName, fullMarkdownContent);
 				}
-				mapping.targetNotePath = targetFile.path;
+				mapping.targetNotePath = fileName;
 				await this.saveSettings();
 			}
 		} catch (error: unknown) {
@@ -819,17 +1415,14 @@ export default class TrelloSyncPlugin extends Plugin {
 		try {
 			const allCards = await this.getBoardCards(folderToTrelloBoardId);
 			const allActiveCards = allCards.filter((c) => !c.closed);
-
 			const trelloCardNamesMap = new Map<string, TrelloCard>();
-			for (const card of allActiveCards) {
+			for (const card of allActiveCards)
 				trelloCardNamesMap.set(card.name.trim().toLowerCase(), card);
-			}
 
 			const listCards = allActiveCards.filter(
 				(c) => c.idList === folderToTrelloListId,
 			);
 			const obsidianItemsMap = new Map<string, string>();
-
 			const mappedNotePaths = new Set(
 				boardMappings.map((m) => m.targetNotePath),
 			);
@@ -845,7 +1438,6 @@ export default class TrelloSyncPlugin extends Plugin {
 				} else if (child instanceof TFolder) {
 					itemName = child.name;
 				}
-
 				if (itemName)
 					obsidianItemsMap.set(
 						itemName.trim().toLowerCase(),
@@ -862,7 +1454,6 @@ export default class TrelloSyncPlugin extends Plugin {
 
 			for (const card of listCards) {
 				const normalizedCardName = card.name.trim().toLowerCase();
-				// מוחק רק אם מדובר בפתק שקיים באובסידיאן והוא כבר לא בתיקייה (מונע מחיקה של כרטיסים שנוצרו ידנית בטרלו)
 				if (
 					allFileNames.has(normalizedCardName) &&
 					!obsidianItemsMap.has(normalizedCardName)
@@ -871,12 +1462,7 @@ export default class TrelloSyncPlugin extends Plugin {
 						if (deleteBehavior === 'delete')
 							await this.deleteTrelloCard(card.id);
 						else await this.archiveTrelloCard(card.id);
-					} catch (err: unknown) {
-						console.error(
-							`Failed to remove/archive card "${card.name}" in Trello`,
-							err,
-						);
-					}
+					} catch (err: unknown) {}
 				}
 			}
 
@@ -890,17 +1476,10 @@ export default class TrelloSyncPlugin extends Plugin {
 							originalName,
 							folderToTrelloListId,
 						);
-					} catch (err: unknown) {
-						console.error(
-							`Failed to create Trello card for "${originalName}"`,
-							err,
-						);
-					}
+					} catch (err: unknown) {}
 				}
 			}
-		} catch (error: unknown) {
-			console.error('Folder to Trello Sync Error:', error);
-		}
+		} catch (error: unknown) {}
 	}
 
 	async syncTagAutomations() {
@@ -929,7 +1508,6 @@ export default class TrelloSyncPlugin extends Plugin {
 			const taggedFiles = allFiles.filter((file) => {
 				const cache = this.app.metadataCache.getFileCache(file);
 				if (!cache) return false;
-
 				if (
 					cache.tags?.some(
 						(t) => t.tag.toLowerCase() === cleanTag.toLowerCase(),
@@ -962,23 +1540,19 @@ export default class TrelloSyncPlugin extends Plugin {
 				const listCards = allActiveCards.filter(
 					(c) => c.idList === automation.listId,
 				);
-
 				const cardNamesMap = new Map<string, TrelloCard>();
-				for (const card of allActiveCards) {
+				for (const card of allActiveCards)
 					cardNamesMap.set(card.name.trim().toLowerCase(), card);
-				}
 
 				const taggedItemsMap = new Map<string, string>();
-				for (const file of taggedFiles) {
+				for (const file of taggedFiles)
 					taggedItemsMap.set(
 						file.basename.trim().toLowerCase(),
 						file.basename,
 					);
-				}
 
 				for (const card of listCards) {
 					const normName = card.name.trim().toLowerCase();
-					// מוחק רק אם זה פתק אמיתי שקיים באובסידיאן, והוא כבר לא מתויג (מגן על כרטיסים אחרים)
 					if (
 						allFileNames.has(normName) &&
 						!taggedItemsMap.has(normName)
@@ -987,12 +1561,7 @@ export default class TrelloSyncPlugin extends Plugin {
 							if (deleteBehavior === 'delete')
 								await this.deleteTrelloCard(card.id);
 							else await this.archiveTrelloCard(card.id);
-						} catch (err: unknown) {
-							console.error(
-								`Failed to remove/archive tagged card "${card.name}"`,
-								err,
-							);
-						}
+						} catch (err: unknown) {}
 					}
 				}
 
@@ -1012,17 +1581,10 @@ export default class TrelloSyncPlugin extends Plugin {
 								[tagWithoutHash],
 								boardLabels,
 							);
-						} catch (err: unknown) {
-							console.error(
-								`Failed to create Trello card for tagged note "${orig}"`,
-								err,
-							);
-						}
+						} catch (err: unknown) {}
 					}
 				}
-			} catch (err: unknown) {
-				console.error('Tag to Trello Sync Error:', err);
-			}
+			} catch (err: unknown) {}
 		}
 	}
 
@@ -1065,18 +1627,208 @@ export default class TrelloSyncPlugin extends Plugin {
 	}
 }
 
+class TrelloKanbanView extends ItemView {
+	plugin: TrelloSyncPlugin;
+	selectedBoardId: string = '';
+
+	constructor(leaf: WorkspaceLeaf, plugin: TrelloSyncPlugin) {
+		super(leaf);
+		this.plugin = plugin;
+	}
+
+	getViewType() {
+		return TRELLO_KANBAN_VIEW_TYPE;
+	}
+	getDisplayText() {
+		return 'Trello Kanban Board';
+	}
+	getIcon() {
+		return 'trello';
+	}
+
+	async onOpen() {
+		const container = this.contentEl;
+		container.empty();
+
+		container.createEl('style', {
+			text: `
+			.trello-kanban-container { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+			.trello-kanban-header { padding: 15px; border-bottom: 1px solid var(--background-modifier-border); display: flex; align-items: center; gap: 10px; }
+			.trello-kanban-board { display: flex; gap: 16px; padding: 16px; overflow-x: auto; flex-grow: 1; align-items: flex-start; }
+			.trello-kanban-list { background-color: var(--background-secondary); border-radius: 8px; width: 280px; min-width: 280px; max-height: 100%; display: flex; flex-direction: column; padding: 10px; border: 1px solid var(--background-modifier-border); }
+			.trello-kanban-list-header { font-weight: 600; margin-bottom: 12px; font-size: 1.1em; color: var(--text-normal); }
+			.trello-kanban-cards { flex-grow: 1; overflow-y: auto; min-height: 50px; display: flex; flex-direction: column; gap: 8px; }
+			.trello-kanban-card { background-color: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 10px; cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,0.1); color: var(--text-normal); }
+			.trello-kanban-card:active { cursor: grabbing; }
+			.trello-kanban-card.dragging { opacity: 0.5; border: 1px dashed var(--text-muted); }
+			.trello-card-labels { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+			.trello-card-label { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--interactive-accent); color: var(--text-on-accent); font-weight: 500;}
+			.trello-card-name { font-size: 14px; line-height: 1.4; }
+			.trello-card-members { margin-top: 8px; font-size: 12px; color: var(--text-muted); display: flex; gap: 4px; }
+			`,
+		});
+
+		const rootEl = container.createDiv({ cls: 'trello-kanban-container' });
+		const headerEl = rootEl.createDiv({ cls: 'trello-kanban-header' });
+
+		headerEl.createEl('label', { text: 'Select Board: ' });
+		const selectEl = headerEl.createEl('select', { cls: 'dropdown' });
+		selectEl.createEl('option', {
+			value: '',
+			text: '-- Choose a board --',
+		});
+
+		const boardAreaEl = rootEl.createDiv({ cls: 'trello-kanban-board' });
+
+		try {
+			const boards = await this.plugin.getTrelloBoards();
+			boards.forEach((b) => {
+				selectEl.createEl('option', { value: b.id, text: b.name });
+			});
+
+			selectEl.addEventListener('change', async (e) => {
+				const target = e.target as HTMLSelectElement;
+				this.selectedBoardId = target.value;
+				await this.renderBoard(boardAreaEl);
+			});
+
+			if (this.plugin.settings.boardMappings.length > 0) {
+				const firstMapped =
+					this.plugin.settings.boardMappings[0]?.boardId;
+				if (firstMapped && boards.find((b) => b.id === firstMapped)) {
+					selectEl.value = firstMapped;
+					this.selectedBoardId = firstMapped;
+					await this.renderBoard(boardAreaEl);
+				}
+			}
+		} catch (e) {
+			headerEl.createEl('span', {
+				text: 'Error loading boards. Check API key.',
+			});
+		}
+	}
+
+	async renderBoard(container: HTMLElement) {
+		container.empty();
+		if (!this.selectedBoardId) return;
+
+		container.createEl('div', { text: 'Loading board data...' });
+
+		try {
+			const lists = await this.plugin.getBoardLists(this.selectedBoardId);
+			const cards = await this.plugin.getBoardCards(this.selectedBoardId);
+
+			container.empty();
+
+			for (const list of lists) {
+				const listEl = container.createDiv({
+					cls: 'trello-kanban-list',
+				});
+				listEl.createDiv({
+					cls: 'trello-kanban-list-header',
+					text: list.name,
+				});
+
+				const cardsContainer = listEl.createDiv({
+					cls: 'trello-kanban-cards',
+				});
+				cardsContainer.dataset.listId = list.id;
+
+				cardsContainer.addEventListener('dragover', (e) => {
+					e.preventDefault();
+					cardsContainer.style.background =
+						'var(--background-modifier-hover)';
+				});
+				cardsContainer.addEventListener('dragleave', (e) => {
+					cardsContainer.style.background = '';
+				});
+				cardsContainer.addEventListener('drop', async (e) => {
+					e.preventDefault();
+					cardsContainer.style.background = '';
+					const cardId = e.dataTransfer?.getData('text/plain');
+					if (cardId) {
+						const draggedEl = container.querySelector(
+							`[data-card-id="${cardId}"]`,
+						);
+						if (draggedEl) cardsContainer.appendChild(draggedEl);
+
+						try {
+							await this.plugin.updateTrelloCard(cardId, {
+								targetListId: list.id,
+							});
+							new Notice('Card moved!');
+						} catch (error) {
+							new Notice('Failed to move card.');
+							await this.renderBoard(container);
+						}
+					}
+				});
+
+				const listCards = cards.filter(
+					(c) => c.idList === list.id && !c.closed,
+				);
+				for (const card of listCards) {
+					const cardEl = cardsContainer.createDiv({
+						cls: 'trello-kanban-card',
+					});
+					cardEl.draggable = true;
+					cardEl.dataset.cardId = card.id;
+
+					cardEl.addEventListener('dragstart', (e) => {
+						cardEl.classList.add('dragging');
+						e.dataTransfer?.setData('text/plain', card.id);
+					});
+					cardEl.addEventListener('dragend', () => {
+						cardEl.classList.remove('dragging');
+					});
+
+					if (card.labels && card.labels.length > 0) {
+						const labelsEl = cardEl.createDiv({
+							cls: 'trello-card-labels',
+						});
+						card.labels.forEach((l) => {
+							if (l.name)
+								labelsEl.createDiv({
+									cls: 'trello-card-label',
+									text: l.name,
+								});
+						});
+					}
+
+					cardEl.createDiv({
+						cls: 'trello-card-name',
+						text: card.name,
+					});
+
+					if (card.members && card.members.length > 0) {
+						const membersEl = cardEl.createDiv({
+							cls: 'trello-card-members',
+						});
+						card.members.forEach((m) => {
+							membersEl.createSpan({ text: `@${m.username}` });
+						});
+					}
+				}
+			}
+		} catch (e) {
+			container.empty();
+			container.createEl('div', { text: 'Error fetching board.' });
+		}
+	}
+}
+
 class CreateTrelloCardModal extends Modal {
 	plugin: TrelloSyncPlugin;
 	boards: TrelloBoard[] = [];
 	lists: TrelloList[] = [];
-
 	selectedBoardId: string = '';
 	selectedListId: string = '';
 	selectedTag: string = '';
 	cardName: string = '';
+	cardDescription: string = '';
+	checklistText: string = '';
 	startDate: string = '';
 	dueDate: string = '';
-
 	listDropdownEl: HTMLElement | null = null;
 
 	constructor(app: App, plugin: TrelloSyncPlugin) {
@@ -1114,6 +1866,23 @@ class CreateTrelloCardModal extends Modal {
 		new Setting(contentEl)
 			.setName('Card Name')
 			.addText((text) => text.onChange((val) => (this.cardName = val)));
+
+		new Setting(contentEl).setName('Description').addTextArea((text) => {
+			text.setPlaceholder('Enter card description...');
+			text.onChange((val) => (this.cardDescription = val));
+			text.inputEl.rows = 3;
+			text.inputEl.cols = 40;
+		});
+
+		new Setting(contentEl)
+			.setName('Checklist Items')
+			.setDesc('Enter checklist items (one per line)')
+			.addTextArea((text) => {
+				text.setPlaceholder('Task 1\nTask 2\nTask 3');
+				text.onChange((val) => (this.checklistText = val));
+				text.inputEl.rows = 4;
+				text.inputEl.cols = 40;
+			});
 
 		new Setting(contentEl)
 			.setName('Label / Tag')
@@ -1154,8 +1923,8 @@ class CreateTrelloCardModal extends Modal {
 								this.selectedListId,
 								this.startDate,
 								this.dueDate,
+								this.cardDescription,
 							);
-
 							if (this.selectedTag && this.selectedBoardId) {
 								const boardLabels =
 									await this.plugin.getBoardLabels(
@@ -1164,16 +1933,35 @@ class CreateTrelloCardModal extends Modal {
 								const cleanTag = this.selectedTag
 									.replace('#', '')
 									.trim();
-								if (cleanTag) {
+								if (cleanTag)
 									await this.plugin.syncCardLabels(
 										this.selectedBoardId,
 										newCard.id,
 										[cleanTag],
 										boardLabels,
 									);
+							}
+							if (
+								this.checklistText &&
+								this.checklistText.trim() !== ''
+							) {
+								const items = this.checklistText
+									.split('\n')
+									.filter((i) => i.trim() !== '');
+								if (items.length > 0) {
+									const cl =
+										await this.plugin.createChecklist(
+											newCard.id,
+											'Checklist',
+										);
+									for (const item of items) {
+										await this.plugin.createChecklistItem(
+											cl.id,
+											item.trim(),
+										);
+									}
 								}
 							}
-
 							new Notice('Trello Card Created!');
 							this.close();
 							void this.plugin.syncAllBoards(true);

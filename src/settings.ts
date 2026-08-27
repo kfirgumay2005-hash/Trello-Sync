@@ -34,6 +34,13 @@ export interface TrelloPluginSettings {
 	folderToTrelloListId: string;
 
 	tagAutomations: TagAutomation[];
+
+	// --- Content Sync Settings ---
+	showBoardMembers: boolean;
+	syncCardMembers: boolean;
+	syncCardChecklists: boolean;
+	syncCardDescription: boolean;
+	syncListNames: boolean;
 }
 
 export const DEFAULT_SETTINGS: TrelloPluginSettings = {
@@ -49,6 +56,12 @@ export const DEFAULT_SETTINGS: TrelloPluginSettings = {
 	folderToTrelloListId: '',
 
 	tagAutomations: [],
+
+	showBoardMembers: false,
+	syncCardMembers: false,
+	syncCardChecklists: false,
+	syncCardDescription: false,
+	syncListNames: false,
 };
 
 // Interface to type-safely access hidden Obsidian methods without using 'any'
@@ -114,6 +127,73 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								this.display();
 							}
 						});
+					}),
+			);
+
+		// --- Content Sync Preferences (Moved up so they are clearly visible) ---
+		new Setting(containerEl).setName('Content Sync Features').setHeading();
+
+		new Setting(containerEl)
+			.setName('Show Board Members')
+			.setDesc(
+				'Display the list of board members at the top of the synced note.',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.showBoardMembers)
+					.onChange((value) => {
+						this.plugin.settings.showBoardMembers = value;
+						void this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Sync Card Members')
+			.setDesc('Show assigned members next to each card name.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncCardMembers)
+					.onChange((value) => {
+						this.plugin.settings.syncCardMembers = value;
+						void this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Sync Card Description')
+			.setDesc('Sync the description of the card directly into the note.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncCardDescription)
+					.onChange((value) => {
+						this.plugin.settings.syncCardDescription = value;
+						void this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Sync Card Checklists')
+			.setDesc('Sync checklists as nested tasks under the card.')
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncCardChecklists)
+					.onChange((value) => {
+						this.plugin.settings.syncCardChecklists = value;
+						void this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Sync List Names')
+			.setDesc(
+				'Enable two-way synchronization for list names. Id will appear near each list',
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncListNames)
+					.onChange((value) => {
+						this.plugin.settings.syncListNames = value;
+						void this.plugin.saveSettings();
 					}),
 			);
 
@@ -293,7 +373,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 								);
 							});
 
-						// Fix for obsidianmd/no-static-styles-assignment
 						ruleSetting.settingEl.setCssStyles({
 							borderTop: 'none',
 							paddingTop: '0',
@@ -301,7 +380,6 @@ export class TrelloSyncSettingTab extends PluginSettingTab {
 					});
 
 					const addRuleSetting = new Setting(containerEl);
-					// Fix for obsidianmd/no-static-styles-assignment
 					addRuleSetting.settingEl.setCssStyles({
 						borderTop: 'none',
 					});
