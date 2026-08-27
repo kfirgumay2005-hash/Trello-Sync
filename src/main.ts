@@ -7,9 +7,6 @@ import {
 	Modal,
 	App,
 	Setting,
-	TextAreaComponent,
-	ItemView,
-	WorkspaceLeaf,
 } from 'obsidian';
 import {
 	BoardMapping,
@@ -91,8 +88,6 @@ interface ParsedObsidian {
 	lists: ObsParsedList[];
 }
 
-export const TRELLO_KANBAN_VIEW_TYPE = 'trello-kanban-view';
-
 export default class TrelloSyncPlugin extends Plugin {
 	settings!: TrelloPluginSettings;
 	syncTimerId: number | null = null;
@@ -112,11 +107,6 @@ export default class TrelloSyncPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
-		this.registerView(
-			TRELLO_KANBAN_VIEW_TYPE,
-			(leaf) => new TrelloKanbanView(leaf, this),
-		);
-
 		this.addRibbonIcon('plus-circle', 'Create Trello Card', () => {
 			new CreateTrelloCardModal(this.app, this).open();
 		});
@@ -129,37 +119,9 @@ export default class TrelloSyncPlugin extends Plugin {
 			},
 		});
 
-		this.addCommand({
-			id: 'open-trello-kanban-view',
-			name: 'Open Trello Kanban Board',
-			callback: () => {
-				this.activateKanbanView();
-			},
-		});
-
 		this.addSettingTab(new TrelloSyncSettingTab(this.app, this));
 
 		this.setupSyncInterval();
-	}
-
-	async activateKanbanView() {
-		const { workspace } = this.app;
-		let leaf: WorkspaceLeaf;
-
-		const leaves = workspace.getLeavesOfType(TRELLO_KANBAN_VIEW_TYPE);
-		if (leaves.length > 0) {
-			leaf = leaves[0] as WorkspaceLeaf;
-		} else {
-			leaf = workspace.getLeaf(true);
-			await leaf.setViewState({
-				type: TRELLO_KANBAN_VIEW_TYPE,
-				active: true,
-			});
-		}
-
-		if (leaf) {
-			workspace.revealLeaf(leaf);
-		}
 	}
 
 	onunload() {
@@ -307,7 +269,7 @@ export default class TrelloSyncPlugin extends Plugin {
 		if (start) url += `&start=${start}`;
 		if (due) url += `&due=${due}`;
 
-		const body: any = {};
+		const body: Record<string, string> = {};
 		if (desc) body.desc = desc;
 
 		const response = await requestUrl({
@@ -358,7 +320,7 @@ export default class TrelloSyncPlugin extends Plugin {
 		const { apiKey, apiToken } = this.settings;
 		const url = `https://api.trello.com/1/cards/${cardId}?key=${apiKey}&token=${apiToken}`;
 
-		const body: any = {};
+		const body: Record<string, string | boolean | null> = {};
 		if (props.isComplete !== undefined) body.dueComplete = props.isComplete;
 		if (props.targetListId) body.idList = props.targetListId;
 		if (props.start !== undefined) body.start = props.start || null;
@@ -552,11 +514,11 @@ export default class TrelloSyncPlugin extends Plugin {
 			}
 
 			if (currentCard) {
-				if (line.startsWith('  > ')) {
+				if (line.startsWith(' {2}> ') || line.startsWith('  > ')) {
 					currentCard.desc +=
 						(currentCard.desc ? '\n' : '') + line.substring(4);
-				} else if (line.match(/^  - \[(x|X| )\] /)) {
-					const cm = line.match(/^  - \[(x|X| )\] (.*)/);
+				} else if (line.match(/^ {2}- \[(x|X| )\] /)) {
+					const cm = line.match(/^ {2}- \[(x|X| )\] (.*)/);
 					if (cm && cm[2]) {
 						currentCard.checkItems.push({
 							checked: (cm[1] || '').toLowerCase() === 'x',
@@ -671,10 +633,10 @@ export default class TrelloSyncPlugin extends Plugin {
 												statusKey,
 												obsList.name,
 											);
-										} catch (e) {
-											console.error(
+										} catch (err) {
+											console.debug(
 												'Failed to rename Trello list',
-												e,
+												err,
 											);
 										}
 									} else {
@@ -708,8 +670,8 @@ export default class TrelloSyncPlugin extends Plugin {
 									await this.deleteTrelloCard(knownId);
 								else await this.archiveTrelloCard(knownId);
 								cards = cards.filter((c) => c.id !== knownId);
-							} catch (err: unknown) {
-								console.error(
+							} catch (err) {
+								console.debug(
 									`Failed to remove/archive card ${knownId} in Trello.`,
 									err,
 								);
@@ -743,7 +705,7 @@ export default class TrelloSyncPlugin extends Plugin {
 
 							const memIds = obsCard.members
 								.map((u) => memberMap.get(u.toLowerCase()))
-								.filter(Boolean) as string[];
+								.filter((id): id is string => !!id);
 							if (memIds.length > 0) {
 								await this.updateTrelloCard(newCard.id, {
 									idMembers: memIds,
@@ -752,7 +714,7 @@ export default class TrelloSyncPlugin extends Plugin {
 									.map((id) =>
 										boardMembers.find((m) => m.id === id),
 									)
-									.filter(Boolean) as TrelloMember[];
+									.filter((m): m is TrelloMember => !!m);
 							}
 
 							if (obsCard.checkItems.length > 0) {
@@ -798,8 +760,8 @@ export default class TrelloSyncPlugin extends Plugin {
 
 							cards.push(newCard);
 							knownCardIds.add(newCard.id);
-						} catch (err: unknown) {
-							console.error(
+						} catch (err) {
+							console.debug(
 								`Failed to create card "${obsCard.name}" in Trello.`,
 								err,
 							);
@@ -911,7 +873,9 @@ export default class TrelloSyncPlugin extends Plugin {
 									statusKey,
 									obsCard.tags,
 								);
-							} catch (e) {}
+							} catch (err) {
+								console.debug('Failed to sync tags:', err);
+							}
 						} else {
 							this.lastKnownCardLabels.set(statusKey, trelloTags);
 						}
@@ -978,7 +942,7 @@ export default class TrelloSyncPlugin extends Plugin {
 
 						const obsMembersIds = obsCard.members
 							.map((u) => memberMap.get(u.toLowerCase()))
-							.filter(Boolean) as string[];
+							.filter((id): id is string => !!id);
 						const trelloMembersIds = (
 							currentCard.members || []
 						).map((m) => m.id);
@@ -1050,12 +1014,12 @@ export default class TrelloSyncPlugin extends Plugin {
 								}
 								if (updateProps.idMembers !== undefined) {
 									currentCard.members = updateProps.idMembers
-										.map((id: string) =>
+										.map((id) =>
 											boardMembers.find(
 												(m) => m.id === id,
 											),
 										)
-										.filter(Boolean) as TrelloMember[];
+										.filter((m): m is TrelloMember => !!m);
 								}
 								if (updateProps.name !== undefined) {
 									currentCard.name = updateProps.name;
@@ -1064,7 +1028,12 @@ export default class TrelloSyncPlugin extends Plugin {
 									statusKey,
 									lastDates,
 								);
-							} catch (err: unknown) {}
+							} catch (err) {
+								console.debug(
+									'Failed to update card properties:',
+									err,
+								);
+							}
 						} else {
 							this.lastKnownCardDates.set(statusKey, {
 								start: trelloStart,
@@ -1131,7 +1100,12 @@ export default class TrelloSyncPlugin extends Plugin {
 											trelloItem,
 										);
 										matchedTrelloItemIds.add(trelloItem.id);
-									} catch (e) {}
+									} catch (err) {
+										console.debug(
+											'Failed to create checklist item:',
+											err,
+										);
+									}
 								}
 							} else {
 								matchedTrelloItemIds.add(trelloItem.id);
@@ -1191,7 +1165,12 @@ export default class TrelloSyncPlugin extends Plugin {
 									this.lastKnownChecklistState.delete(
 										`${statusKey}::checklist::${tItem.name}`,
 									);
-								} catch (e) {}
+								} catch (err) {
+									console.debug(
+										'Failed to delete checklist item:',
+										err,
+									);
+								}
 							}
 							trelloChecklist.checkItems =
 								trelloChecklist.checkItems.filter((i) =>
@@ -1227,7 +1206,9 @@ export default class TrelloSyncPlugin extends Plugin {
 								targetListId: newTargetListId,
 							});
 							card.idList = newTargetListId;
-						} catch (err: unknown) {}
+						} catch (err) {
+							console.debug('Failed automation update:', err);
+						}
 					}
 				}
 			}
@@ -1242,7 +1223,12 @@ export default class TrelloSyncPlugin extends Plugin {
 					if (boardMembersInfo && boardMembersInfo.length > 0) {
 						trelloSection += `**👥Board Members:** ${boardMembersInfo.map((m) => `@${m.username}`).join(', ')}\n\n`;
 					}
-				} catch (err) {}
+				} catch (err) {
+					console.debug(
+						'Failed to fetch members for section header:',
+						err,
+					);
+				}
 			}
 
 			trelloSection += `---\n\n`;
@@ -1340,7 +1326,7 @@ export default class TrelloSyncPlugin extends Plugin {
 											item.state === 'complete'
 												? 'x'
 												: ' ';
-										trelloSection += `  - [${itemChecked}] ${item.name}\n`;
+										trelloSection += ` {2}- [${itemChecked}] ${item.name}\n`;
 										this.lastKnownChecklistState.set(
 											`${statusKey}::checklist::${item.name}`,
 											item.state === 'complete',
@@ -1360,7 +1346,6 @@ export default class TrelloSyncPlugin extends Plugin {
 				? `${trelloSection}\n\n${extraUserContent}`
 				: `${trelloSection}\n`;
 
-			let targetFile: TFile;
 			if (existingFile) {
 				if (
 					existingContent.trim() !==
@@ -1384,7 +1369,7 @@ export default class TrelloSyncPlugin extends Plugin {
 				mapping.targetNotePath = fileName;
 				await this.saveSettings();
 			}
-		} catch (error: unknown) {
+		} catch (error) {
 			console.error('Trello Sync Error:', error);
 		}
 	}
@@ -1462,7 +1447,12 @@ export default class TrelloSyncPlugin extends Plugin {
 						if (deleteBehavior === 'delete')
 							await this.deleteTrelloCard(card.id);
 						else await this.archiveTrelloCard(card.id);
-					} catch (err: unknown) {}
+					} catch (err) {
+						console.debug(
+							'Failed removing card from folder tracking:',
+							err,
+						);
+					}
 				}
 			}
 
@@ -1476,10 +1466,17 @@ export default class TrelloSyncPlugin extends Plugin {
 							originalName,
 							folderToTrelloListId,
 						);
-					} catch (err: unknown) {}
+					} catch (err) {
+						console.debug(
+							'Failed adding card to folder tracking:',
+							err,
+						);
+					}
 				}
 			}
-		} catch (error: unknown) {}
+		} catch (error) {
+			console.error('Folder Sync Error:', error);
+		}
 	}
 
 	async syncTagAutomations() {
@@ -1561,7 +1558,12 @@ export default class TrelloSyncPlugin extends Plugin {
 							if (deleteBehavior === 'delete')
 								await this.deleteTrelloCard(card.id);
 							else await this.archiveTrelloCard(card.id);
-						} catch (err: unknown) {}
+						} catch (err) {
+							console.debug(
+								'Failed to archive/delete tagged card:',
+								err,
+							);
+						}
 					}
 				}
 
@@ -1581,10 +1583,14 @@ export default class TrelloSyncPlugin extends Plugin {
 								[tagWithoutHash],
 								boardLabels,
 							);
-						} catch (err: unknown) {}
+						} catch (err) {
+							console.debug('Failed to create tagged card:', err);
+						}
 					}
 				}
-			} catch (err: unknown) {}
+			} catch (err) {
+				console.debug('Failed running tag automation check:', err);
+			}
 		}
 	}
 
@@ -1627,196 +1633,6 @@ export default class TrelloSyncPlugin extends Plugin {
 	}
 }
 
-class TrelloKanbanView extends ItemView {
-	plugin: TrelloSyncPlugin;
-	selectedBoardId: string = '';
-
-	constructor(leaf: WorkspaceLeaf, plugin: TrelloSyncPlugin) {
-		super(leaf);
-		this.plugin = plugin;
-	}
-
-	getViewType() {
-		return TRELLO_KANBAN_VIEW_TYPE;
-	}
-	getDisplayText() {
-		return 'Trello Kanban Board';
-	}
-	getIcon() {
-		return 'trello';
-	}
-
-	async onOpen() {
-		const container = this.contentEl;
-		container.empty();
-
-		container.createEl('style', {
-			text: `
-			.trello-kanban-container { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
-			.trello-kanban-header { padding: 15px; border-bottom: 1px solid var(--background-modifier-border); display: flex; align-items: center; gap: 10px; }
-			.trello-kanban-board { display: flex; gap: 16px; padding: 16px; overflow-x: auto; flex-grow: 1; align-items: flex-start; }
-			.trello-kanban-list { background-color: var(--background-secondary); border-radius: 8px; width: 280px; min-width: 280px; max-height: 100%; display: flex; flex-direction: column; padding: 10px; border: 1px solid var(--background-modifier-border); }
-			.trello-kanban-list-header { font-weight: 600; margin-bottom: 12px; font-size: 1.1em; color: var(--text-normal); }
-			.trello-kanban-cards { flex-grow: 1; overflow-y: auto; min-height: 50px; display: flex; flex-direction: column; gap: 8px; }
-			.trello-kanban-card { background-color: var(--background-primary); border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 10px; cursor: grab; box-shadow: 0 1px 2px rgba(0,0,0,0.1); color: var(--text-normal); }
-			.trello-kanban-card:active { cursor: grabbing; }
-			.trello-kanban-card.dragging { opacity: 0.5; border: 1px dashed var(--text-muted); }
-			.trello-card-labels { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
-			.trello-card-label { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: var(--interactive-accent); color: var(--text-on-accent); font-weight: 500;}
-			.trello-card-name { font-size: 14px; line-height: 1.4; }
-			.trello-card-members { margin-top: 8px; font-size: 12px; color: var(--text-muted); display: flex; gap: 4px; }
-			`,
-		});
-
-		const rootEl = container.createDiv({ cls: 'trello-kanban-container' });
-		const headerEl = rootEl.createDiv({ cls: 'trello-kanban-header' });
-
-		headerEl.createEl('label', { text: 'Select Board: ' });
-		const selectEl = headerEl.createEl('select', { cls: 'dropdown' });
-		selectEl.createEl('option', {
-			value: '',
-			text: '-- Choose a board --',
-		});
-
-		const boardAreaEl = rootEl.createDiv({ cls: 'trello-kanban-board' });
-
-		try {
-			const boards = await this.plugin.getTrelloBoards();
-			boards.forEach((b) => {
-				selectEl.createEl('option', { value: b.id, text: b.name });
-			});
-
-			selectEl.addEventListener('change', async (e) => {
-				const target = e.target as HTMLSelectElement;
-				this.selectedBoardId = target.value;
-				await this.renderBoard(boardAreaEl);
-			});
-
-			if (this.plugin.settings.boardMappings.length > 0) {
-				const firstMapped =
-					this.plugin.settings.boardMappings[0]?.boardId;
-				if (firstMapped && boards.find((b) => b.id === firstMapped)) {
-					selectEl.value = firstMapped;
-					this.selectedBoardId = firstMapped;
-					await this.renderBoard(boardAreaEl);
-				}
-			}
-		} catch (e) {
-			headerEl.createEl('span', {
-				text: 'Error loading boards. Check API key.',
-			});
-		}
-	}
-
-	async renderBoard(container: HTMLElement) {
-		container.empty();
-		if (!this.selectedBoardId) return;
-
-		container.createEl('div', { text: 'Loading board data...' });
-
-		try {
-			const lists = await this.plugin.getBoardLists(this.selectedBoardId);
-			const cards = await this.plugin.getBoardCards(this.selectedBoardId);
-
-			container.empty();
-
-			for (const list of lists) {
-				const listEl = container.createDiv({
-					cls: 'trello-kanban-list',
-				});
-				listEl.createDiv({
-					cls: 'trello-kanban-list-header',
-					text: list.name,
-				});
-
-				const cardsContainer = listEl.createDiv({
-					cls: 'trello-kanban-cards',
-				});
-				cardsContainer.dataset.listId = list.id;
-
-				cardsContainer.addEventListener('dragover', (e) => {
-					e.preventDefault();
-					cardsContainer.style.background =
-						'var(--background-modifier-hover)';
-				});
-				cardsContainer.addEventListener('dragleave', (e) => {
-					cardsContainer.style.background = '';
-				});
-				cardsContainer.addEventListener('drop', async (e) => {
-					e.preventDefault();
-					cardsContainer.style.background = '';
-					const cardId = e.dataTransfer?.getData('text/plain');
-					if (cardId) {
-						const draggedEl = container.querySelector(
-							`[data-card-id="${cardId}"]`,
-						);
-						if (draggedEl) cardsContainer.appendChild(draggedEl);
-
-						try {
-							await this.plugin.updateTrelloCard(cardId, {
-								targetListId: list.id,
-							});
-							new Notice('Card moved!');
-						} catch (error) {
-							new Notice('Failed to move card.');
-							await this.renderBoard(container);
-						}
-					}
-				});
-
-				const listCards = cards.filter(
-					(c) => c.idList === list.id && !c.closed,
-				);
-				for (const card of listCards) {
-					const cardEl = cardsContainer.createDiv({
-						cls: 'trello-kanban-card',
-					});
-					cardEl.draggable = true;
-					cardEl.dataset.cardId = card.id;
-
-					cardEl.addEventListener('dragstart', (e) => {
-						cardEl.classList.add('dragging');
-						e.dataTransfer?.setData('text/plain', card.id);
-					});
-					cardEl.addEventListener('dragend', () => {
-						cardEl.classList.remove('dragging');
-					});
-
-					if (card.labels && card.labels.length > 0) {
-						const labelsEl = cardEl.createDiv({
-							cls: 'trello-card-labels',
-						});
-						card.labels.forEach((l) => {
-							if (l.name)
-								labelsEl.createDiv({
-									cls: 'trello-card-label',
-									text: l.name,
-								});
-						});
-					}
-
-					cardEl.createDiv({
-						cls: 'trello-card-name',
-						text: card.name,
-					});
-
-					if (card.members && card.members.length > 0) {
-						const membersEl = cardEl.createDiv({
-							cls: 'trello-card-members',
-						});
-						card.members.forEach((m) => {
-							membersEl.createSpan({ text: `@${m.username}` });
-						});
-					}
-				}
-			}
-		} catch (e) {
-			container.empty();
-			container.createEl('div', { text: 'Error fetching board.' });
-		}
-	}
-}
-
 class CreateTrelloCardModal extends Modal {
 	plugin: TrelloSyncPlugin;
 	boards: TrelloBoard[] = [];
@@ -1841,7 +1657,10 @@ class CreateTrelloCardModal extends Modal {
 		contentEl.empty();
 		contentEl.createEl('h2', { text: 'Create New Trello Card' });
 
-		this.boards = await this.plugin.getTrelloBoards().catch(() => []);
+		this.boards = await this.plugin.getTrelloBoards().catch((err) => {
+			console.debug(err);
+			return [];
+		});
 
 		new Setting(contentEl).setName('Board').addDropdown((drop) => {
 			drop.addOption('', '-- Select Board --');
@@ -1854,7 +1673,10 @@ class CreateTrelloCardModal extends Modal {
 					this.selectedListId = '';
 					this.lists = await this.plugin
 						.getBoardLists(val)
-						.catch(() => []);
+						.catch((err) => {
+							console.debug(err);
+							return [];
+						});
 					this.renderListDropdown();
 				})();
 			});
